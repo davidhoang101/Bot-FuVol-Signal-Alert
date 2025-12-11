@@ -1,0 +1,25 @@
+# Core dependencies
+python-binance==1.0.19
+ccxt==4.2.25
+websockets==12.0
+aiohttp==3.9.1
+
+# Data processing
+pandas==2.1.4
+numpy==1.26.2
+
+# Async utilities
+asyncio-throttle==1.0.2
+
+# Configuration
+python-dotenv==1.0.0
+
+# Logging
+colorlog==6.8.0
+
+# Telegram Bot
+python-telegram-bot==20.7
+
+# Optional: Redis for caching (can be added later)
+# redis==5.0.1
+# aioredis==2.0.1
