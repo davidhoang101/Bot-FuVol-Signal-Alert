@@ -123,13 +123,20 @@ class BinanceFuturesClient:
             await self.rate_limiter.acquire()
             exchange_info = await self.client.futures_exchange_info()
             
-            # Filter symbols: USDT pairs, active, sufficient volume
+            # Filter symbols: USDT pairs, active, perpetual contracts
             symbols = []
             for symbol_info in exchange_info['symbols']:
-                if (symbol_info['status'] == 'TRADING' and 
-                    symbol_info['quoteAsset'] == 'USDT' and
-                    symbol_info['contractType'] == 'PERPETUAL'):
+                # Check if symbol is trading and is USDT perpetual
+                status = symbol_info.get('status', '')
+                quote_asset = symbol_info.get('quoteAsset', '')
+                contract_type = symbol_info.get('contractType', '')
+                
+                if (status == 'TRADING' and 
+                    quote_asset == 'USDT' and
+                    contract_type == 'PERPETUAL'):
                     symbols.append(symbol_info['symbol'])
+            
+            logger.info(f"Found {len(symbols)} active USDT perpetual contracts")
             
             # Get 24h ticker to filter by volume
             # Try to get all tickers at once, fallback to individual calls if needed
@@ -165,19 +172,49 @@ class BinanceFuturesClient:
                     if symbol and quote_vol > 0:
                         volume_map[symbol] = quote_vol
                 
+                # Filter by minimum 24h volume
                 filtered = [
                     s for s in symbols 
                     if volume_map.get(s, 0) >= Config.MIN_24H_VOLUME
                 ]
                 
+                logger.info(f"Filtered to {len(filtered)} symbols with volume >= {Config.MIN_24H_VOLUME:,.0f} USDT")
+                
                 # Sort by volume and take top N
                 filtered.sort(key=lambda s: volume_map.get(s, 0), reverse=True)
                 self.symbols = filtered[:Config.MAX_SYMBOLS]
+                
+                # Log some sample symbols for debugging
+                if self.symbols:
+                    logger.info(f"Sample symbols: {', '.join(self.symbols[:10])}")
             else:
                 # No ticker data, just use all symbols
                 self.symbols = symbols[:Config.MAX_SYMBOLS]
             
-            logger.info(f"Loaded {len(self.symbols)} symbols (min 24h volume: {Config.MIN_24H_VOLUME:,.0f} USDT)")
+            logger.info(f"✅ Loaded {len(self.symbols)} symbols (min 24h volume: {Config.MIN_24H_VOLUME:,.0f} USDT, max: {Config.MAX_SYMBOLS})")
+            
+            # Verify symbols exist by checking a few
+            if self.symbols:
+                sample_symbol = self.symbols[0]
+                try:
+                    await self.rate_limiter.acquire()
+                    # Try to get ticker for verification
+                    if hasattr(self.client, 'futures_symbol_ticker'):
+                        ticker = await self.client.futures_symbol_ticker(symbol=sample_symbol)
+                    elif hasattr(self.client, 'futures_ticker') and callable(getattr(self.client, 'futures_ticker', None)):
+                        # futures_ticker() might need symbol parameter
+                        tickers = await self.client.futures_ticker()
+                        # Check if sample_symbol is in the list
+                        if isinstance(tickers, list):
+                            found = any(t.get('symbol') == sample_symbol for t in tickers)
+                            if found:
+                                logger.info(f"✅ Verified symbol {sample_symbol} exists on Binance Futures")
+                            else:
+                                logger.warning(f"⚠️ Symbol {sample_symbol} not found in ticker list")
+                    else:
+                        logger.debug(f"Could not verify symbol (no verification method available)")
+                except Exception as e:
+                    logger.debug(f"Could not verify symbol {sample_symbol}: {e}")
             
         except BinanceAPIException as e:
             logger.error(f"Binance API error loading symbols: {e}")
