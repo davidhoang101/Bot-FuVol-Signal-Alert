@@ -304,8 +304,8 @@ class BinanceFuturesClient:
                 async with websockets.connect(
                     ws_url, 
                     ssl=ssl_context,
-                    ping_interval=30,     # Auto ping every 30 seconds
-                    ping_timeout=20,      # Wait 20 seconds for pong
+                    ping_interval=20,     # Auto ping every 20 seconds (more frequent)
+                    ping_timeout=15,      # Wait 15 seconds for pong
                     close_timeout=10,
                     max_size=2**23
                 ) as websocket:
@@ -316,7 +316,7 @@ class BinanceFuturesClient:
                         """Backup ping task in case auto ping fails."""
                         try:
                             while self._running:
-                                await asyncio.sleep(25)  # Backup ping every 25 seconds
+                                await asyncio.sleep(18)  # Backup ping every 18 seconds (before auto ping)
                                 try:
                                     if not websocket.closed:
                                         await websocket.ping()
@@ -362,24 +362,24 @@ class BinanceFuturesClient:
                 while self._running:
                     try:
                         # Use auto ping with settings optimized for Binance
-                        # Binance requires response within 10 minutes, we ping every 30s
+                        # Binance requires response within 10 minutes, we ping every 20s (more frequent)
                         async with websockets.connect(
                             url, 
                             ssl=ssl_context,
-                            ping_interval=30,     # Auto ping every 30 seconds
-                            ping_timeout=20,      # Wait 20 seconds for pong
+                            ping_interval=20,     # Auto ping every 20 seconds (more frequent)
+                            ping_timeout=15,      # Wait 15 seconds for pong
                             close_timeout=10,
                             max_size=2**23
                         ) as websocket:
                             logger.info(f"✅ Connected to {stream_name}")
                             reconnect_count = 0  # Reset on successful connection
                             
-                            # Additional manual ping as backup (every 25 seconds)
+                            # Additional manual ping as backup (every 18 seconds)
                             async def backup_ping_task():
                                 """Backup ping task in case auto ping fails."""
                                 try:
                                     while self._running:
-                                        await asyncio.sleep(25)  # Backup ping every 25 seconds
+                                        await asyncio.sleep(18)  # Backup ping every 18 seconds (before auto ping)
                                         try:
                                             if not websocket.closed:
                                                 # Send raw ping frame
@@ -414,10 +414,10 @@ class BinanceFuturesClient:
                         if not self._running:
                             break
                         reconnect_count += 1
-                        # Log ping timeout as info (not warning) since it's expected behavior
+                        # Log ping timeout as debug (not warning) since it's expected behavior
                         if "ping timeout" in str(e).lower():
-                            if reconnect_count <= 1:
-                                logger.info(f"Stream {stream_name} ping timeout, reconnecting... (attempt {reconnect_count})")
+                            # Don't log ping timeout - it's normal and will reconnect
+                            pass
                         else:
                             if reconnect_count <= 3:
                                 logger.warning(f"Stream {stream_name} connection closed: {e}, reconnecting... (attempt {reconnect_count})")
@@ -426,7 +426,9 @@ class BinanceFuturesClient:
                         if not self._running:
                             break
                         reconnect_count += 1
-                        if reconnect_count <= 3:  # Only log first few reconnects
+                        # Suppress ping timeout errors in exception handler too
+                        error_str = str(e).lower()
+                        if "ping timeout" not in error_str and reconnect_count <= 3:
                             logger.warning(f"Stream {stream_name} error: {e}, reconnecting... (attempt {reconnect_count})")
                         await asyncio.sleep(Config.WEBSOCKET_RECONNECT_DELAY)
             
@@ -436,11 +438,15 @@ class BinanceFuturesClient:
         # Wait for all individual streams and handle exceptions
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Log any exceptions that occurred
+        # Log any exceptions that occurred (but suppress ping timeout)
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 stream_name = streams[i] if i < len(streams) else f"stream_{i}"
-                if not isinstance(result, (asyncio.CancelledError, websockets.exceptions.ConnectionClosed)):
+                # Suppress ping timeout and connection closed errors (they're handled by reconnect logic)
+                if isinstance(result, (asyncio.CancelledError, websockets.exceptions.ConnectionClosed)):
+                    continue
+                error_str = str(result).lower()
+                if "ping timeout" not in error_str:
                     logger.error(f"Stream {stream_name} task failed: {result}", exc_info=result)
     
     async def get_klines(self, symbol: str, interval: str = "5m", limit: int = 12) -> List[Dict]:
