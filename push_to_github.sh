@@ -11,9 +11,9 @@ fi
 
 GITHUB_USER=$1
 REPO_NAME=$2
-REPO_URL="https://github.com/${GITHUB_USER}/${REPO_NAME}.git"
+REPO_URL="git@github.com:${GITHUB_USER}/${REPO_NAME}.git"
 
-echo "🚀 Setting up remote repository..."
+echo "🚀 Setting up remote repository (SSH)..."
 git remote add origin $REPO_URL 2>/dev/null || git remote set-url origin $REPO_URL
 
 echo "📤 Pushing code to GitHub..."
@@ -22,4 +22,5 @@ git push -u origin main
 
 echo "✅ Done! Your code is now on GitHub:"
 echo "   $REPO_URL"
+echo "   https://github.com/${GITHUB_USER}/${REPO_NAME}"
 
