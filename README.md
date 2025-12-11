@@ -52,7 +52,7 @@ Chỉnh sửa file `.env` hoặc environment variables:
 ```env
 # Detection Parameters
 MIN_VOLUME_THRESHOLD=1000000      # Minimum volume để trigger alert (USDT)
-SPIKE_RATIO_THRESHOLD=3.0         # Tỷ lệ tăng để coi là spike (3x = 300%)
+SPIKE_RATIO_THRESHOLD=2.0         # Tỷ lệ tăng để coi là spike (2x = 200%)
 BASELINE_WINDOW_MINUTES=60        # Thời gian tính baseline (phút)
 COOLDOWN_PERIOD_MINUTES=15        # Thời gian chờ giữa các alerts cho cùng 1 symbol
 UPDATE_INTERVAL_SECONDS=5         # Tần suất check spikes (giây)
@@ -95,7 +95,7 @@ railway init
 ```bash
 # Thiết lập các biến môi trường cần thiết
 railway variables set MIN_VOLUME_THRESHOLD=1000000
-railway variables set SPIKE_RATIO_THRESHOLD=3.0
+railway variables set SPIKE_RATIO_THRESHOLD=2.0
 railway variables set BASELINE_WINDOW_MINUTES=60
 railway variables set COOLDOWN_PERIOD_MINUTES=15
 railway variables set UPDATE_INTERVAL_SECONDS=5

@@ -17,7 +17,7 @@ class Config:
     
     # Detection Parameters
     MIN_VOLUME_THRESHOLD: float = float(os.getenv("MIN_VOLUME_THRESHOLD", "1000000"))
-    SPIKE_RATIO_THRESHOLD: float = float(os.getenv("SPIKE_RATIO_THRESHOLD", "3.0"))
+    SPIKE_RATIO_THRESHOLD: float = float(os.getenv("SPIKE_RATIO_THRESHOLD", "2.0"))
     BASELINE_WINDOW_MINUTES: int = int(os.getenv("BASELINE_WINDOW_MINUTES", "60"))
     COOLDOWN_PERIOD_MINUTES: int = int(os.getenv("COOLDOWN_PERIOD_MINUTES", "15"))
     UPDATE_INTERVAL_SECONDS: int = int(os.getenv("UPDATE_INTERVAL_SECONDS", "5"))

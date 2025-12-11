@@ -47,6 +47,8 @@ class VolumeAlertSystem:
         self.stats['symbols_monitored'] = len(self.binance_client.symbols)
         
         # Initialize Telegram bot
+        self.telegram_bot.set_volume_calculator(self.volume_calculator)
+        self.telegram_bot.set_binance_client(self.binance_client)
         telegram_enabled = await self.telegram_bot.initialize()
         if telegram_enabled:
             logger.info("Telegram alerts enabled")
@@ -127,6 +129,16 @@ class VolumeAlertSystem:
                 if spike_info:
                     # Spike detected!
                     self.stats['alerts_triggered'] += 1
+                    
+                    # Get current and baseline prices for price direction
+                    current_price = await self.volume_calculator.get_current_price(symbol, current_timestamp)
+                    baseline_price = await self.volume_calculator.get_baseline_price(
+                        symbol, current_timestamp, minutes_back=Config.BASELINE_WINDOW_MINUTES
+                    )
+                    
+                    # Add price info to spike_info
+                    spike_info['current_price'] = current_price
+                    spike_info['baseline_price'] = baseline_price
                     
                     # Format alert messages
                     console_message = self.alert_formatter.format_spike_alert(spike_info, "console")

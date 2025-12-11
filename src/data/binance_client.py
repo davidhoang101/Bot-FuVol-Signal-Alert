@@ -223,6 +223,7 @@ class BinanceFuturesClient:
     async def _start_batch_stream(self, streams: List[str], callback: Callable):
         """Start a batch of WebSocket streams using individual connections."""
         import websockets
+        import websockets.exceptions
         import json
         
         async def handle_message(msg_str: str, symbol: str = None):
@@ -266,8 +267,8 @@ class BinanceFuturesClient:
                 async with websockets.connect(
                     ws_url, 
                     ssl=ssl_context,
-                    ping_interval=20,     # Auto ping every 20 seconds
-                    ping_timeout=10,      # Wait 10 seconds for pong
+                    ping_interval=30,     # Auto ping every 30 seconds
+                    ping_timeout=20,      # Wait 20 seconds for pong
                     close_timeout=10,
                     max_size=2**23
                 ) as websocket:
@@ -278,16 +279,19 @@ class BinanceFuturesClient:
                         """Backup ping task in case auto ping fails."""
                         try:
                             while self._running:
-                                await asyncio.sleep(15)
+                                await asyncio.sleep(25)  # Backup ping every 25 seconds
                                 try:
                                     if not websocket.closed:
                                         await websocket.ping()
-                                except (websockets.exceptions.ConnectionClosed, AttributeError):
+                                except (websockets.exceptions.ConnectionClosed, AttributeError) as e:
+                                    logger.debug(f"Backup ping detected connection closed: {e}")
                                     break
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    logger.debug(f"Backup ping error: {e}")
                         except asyncio.CancelledError:
                             pass
+                        except Exception as e:
+                            logger.debug(f"Backup ping task error: {e}")
                     
                     backup_ping_handle = asyncio.create_task(backup_ping_task())
                     
@@ -320,36 +324,39 @@ class BinanceFuturesClient:
                 reconnect_count = 0
                 while self._running:
                     try:
-                        # Use auto ping with aggressive settings + manual backup
-                        # Binance requires response within 10 minutes, we ping every 20s
+                        # Use auto ping with settings optimized for Binance
+                        # Binance requires response within 10 minutes, we ping every 30s
                         async with websockets.connect(
                             url, 
                             ssl=ssl_context,
-                            ping_interval=20,     # Auto ping every 20 seconds
-                            ping_timeout=10,      # Wait 10 seconds for pong
+                            ping_interval=30,     # Auto ping every 30 seconds
+                            ping_timeout=20,      # Wait 20 seconds for pong
                             close_timeout=10,
                             max_size=2**23
                         ) as websocket:
                             logger.info(f"✅ Connected to {stream_name}")
                             reconnect_count = 0  # Reset on successful connection
                             
-                            # Additional manual ping as backup (every 15 seconds)
+                            # Additional manual ping as backup (every 25 seconds)
                             async def backup_ping_task():
                                 """Backup ping task in case auto ping fails."""
                                 try:
                                     while self._running:
-                                        await asyncio.sleep(15)  # Backup ping every 15 seconds
+                                        await asyncio.sleep(25)  # Backup ping every 25 seconds
                                         try:
                                             if not websocket.closed:
                                                 # Send raw ping frame
                                                 await websocket.ping()
-                                        except (websockets.exceptions.ConnectionClosed, AttributeError):
+                                        except (websockets.exceptions.ConnectionClosed, AttributeError) as e:
+                                            logger.debug(f"Backup ping detected connection closed for {stream_name}: {e}")
                                             break
-                                        except Exception:
-                                            # Ignore ping errors, auto ping should handle it
-                                            pass
+                                        except Exception as e:
+                                            # Log but don't break - auto ping should handle it
+                                            logger.debug(f"Backup ping error for {stream_name}: {e}")
                                 except asyncio.CancelledError:
                                     pass
+                                except Exception as e:
+                                    logger.debug(f"Backup ping task error for {stream_name}: {e}")
                             
                             # Start backup ping task
                             backup_ping_handle = asyncio.create_task(backup_ping_task())
@@ -370,8 +377,11 @@ class BinanceFuturesClient:
                         if not self._running:
                             break
                         reconnect_count += 1
-                        # Don't log ping timeout as warning if it's just reconnecting
-                        if "ping timeout" not in str(e).lower() or reconnect_count <= 2:
+                        # Log ping timeout as info (not warning) since it's expected behavior
+                        if "ping timeout" in str(e).lower():
+                            if reconnect_count <= 1:
+                                logger.info(f"Stream {stream_name} ping timeout, reconnecting... (attempt {reconnect_count})")
+                        else:
                             if reconnect_count <= 3:
                                 logger.warning(f"Stream {stream_name} connection closed: {e}, reconnecting... (attempt {reconnect_count})")
                         await asyncio.sleep(Config.WEBSOCKET_RECONNECT_DELAY)
@@ -386,8 +396,15 @@ class BinanceFuturesClient:
             task = asyncio.create_task(connect_stream(stream, ws_url, symbol))
             tasks.append(task)
         
-        # Wait for all individual streams
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # Wait for all individual streams and handle exceptions
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Log any exceptions that occurred
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                stream_name = streams[i] if i < len(streams) else f"stream_{i}"
+                if not isinstance(result, (asyncio.CancelledError, websockets.exceptions.ConnectionClosed)):
+                    logger.error(f"Stream {stream_name} task failed: {result}", exc_info=result)
     
     async def get_klines(self, symbol: str, interval: str = "5m", limit: int = 12) -> List[Dict]:
         """Get historical klines (candlestick data) with rate limiting."""
@@ -419,6 +436,57 @@ class BinanceFuturesClient:
             return []
         except Exception as e:
             logger.warning(f"Error getting klines for {symbol}: {e}")
+            return []
+    
+    async def get_24h_tickers(self) -> List[Dict]:
+        """
+        Get 24h ticker statistics for all symbols.
+        
+        Returns:
+            List of ticker dicts with symbol, priceChangePercent, lastPrice, etc.
+        """
+        try:
+            await self.rate_limiter.acquire()
+            
+            # Try different method names
+            if hasattr(self.client, 'futures_ticker'):
+                tickers = await self.client.futures_ticker()
+            elif hasattr(self.client, 'futures_24hr_ticker'):
+                tickers = await self.client.futures_24hr_ticker()
+            elif hasattr(self.client, 'get_futures_ticker'):
+                tickers = await self.client.get_futures_ticker()
+            else:
+                logger.warning("No ticker method available")
+                return []
+            
+            # Normalize response format
+            if isinstance(tickers, dict):
+                tickers = [tickers]
+            
+            # Convert to list of dicts with normalized keys
+            result = []
+            for ticker in tickers:
+                # Handle different response formats
+                symbol = ticker.get('symbol', '')
+                price_change_percent = float(ticker.get('priceChangePercent', ticker.get('P', 0)))
+                last_price = float(ticker.get('lastPrice', ticker.get('c', 0)))
+                volume_24h = float(ticker.get('quoteVolume', ticker.get('qv', 0)))
+                
+                if symbol and price_change_percent != 0:
+                    result.append({
+                        'symbol': symbol,
+                        'priceChangePercent': price_change_percent,
+                        'lastPrice': last_price,
+                        'volume24h': volume_24h
+                    })
+            
+            return result
+            
+        except BinanceAPIException as e:
+            logger.error(f"Binance API error getting 24h tickers: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Error getting 24h tickers: {e}")
             return []
     
     async def close(self):
