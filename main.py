@@ -33,6 +33,8 @@ class VolumeAlertSystem:
             'alerts_triggered': 0,
             'symbols_monitored': 0
         }
+        # Thread-safe counter for stats
+        self._stats_lock = asyncio.Lock()
     
     async def initialize(self):
         """Initialize all components."""
@@ -66,11 +68,15 @@ class VolumeAlertSystem:
         """Handle incoming trade data."""
         try:
             await self.volume_calculator.add_trade(symbol, price, quantity, timestamp)
-            self.stats['trades_processed'] += 1
+            
+            # Thread-safe counter increment
+            async with self._stats_lock:
+                self.stats['trades_processed'] += 1
+                trades_count = self.stats['trades_processed']
             
             # Log periodically
-            if self.stats['trades_processed'] % 1000 == 0:
-                logger.debug(f"Processed {self.stats['trades_processed']} trades")
+            if trades_count % 1000 == 0:
+                logger.debug(f"Processed {trades_count} trades")
                 
         except Exception as e:
             logger.warning(f"Error handling trade for {symbol}: {e}")
@@ -87,77 +93,91 @@ class VolumeAlertSystem:
         
         logger.debug(f"Checking spikes for {len(symbols)} symbols...")
         
-        for symbol in symbols:
-            try:
-                # Get current volume
-                current_volume = await self.volume_calculator.get_current_volume(
-                    symbol, current_timestamp
-                )
-                
-                if current_volume == 0:
-                    continue
-                
-                # Get volume history for baseline
-                history = await self.volume_calculator.get_volume_history(
-                    symbol,
-                    current_timestamp,
-                    minutes_back=Config.BASELINE_WINDOW_MINUTES
-                )
-                
-                if len(history) < 3:
-                    # Not enough data yet
-                    continue
-                
-                # Calculate baseline (exclude current interval)
-                history_for_baseline = history[:-1] if history else []
-                baseline_volume = self.baseline_calculator.calculate_baseline(
-                    history_for_baseline,
-                    method="median"
-                )
-                
-                if baseline_volume <= 0:
-                    continue
-                
-                # Check for spike
-                spike_info = self.spike_detector.check_spike(
-                    symbol,
-                    current_volume,
-                    baseline_volume,
-                    current_time
-                )
-                
-                if spike_info:
-                    # Spike detected!
-                    self.stats['alerts_triggered'] += 1
-                    
-                    # Get current and baseline prices for price direction
-                    current_price = await self.volume_calculator.get_current_price(symbol, current_timestamp)
-                    baseline_price = await self.volume_calculator.get_baseline_price(
-                        symbol, current_timestamp, minutes_back=Config.BASELINE_WINDOW_MINUTES
+        # Process symbols in parallel for better performance
+        # Use semaphore to limit concurrent operations (avoid overwhelming system)
+        semaphore = asyncio.Semaphore(10)  # Max 10 concurrent symbol checks
+        
+        async def check_symbol_spike(symbol: str):
+            """Check spike for a single symbol."""
+            async with semaphore:
+                try:
+                    # Get current volume
+                    current_volume = await self.volume_calculator.get_current_volume(
+                        symbol, current_timestamp
                     )
                     
-                    # Add price info to spike_info
-                    spike_info['current_price'] = current_price
-                    spike_info['baseline_price'] = baseline_price
+                    if current_volume == 0:
+                        return
                     
-                    # Format alert messages
-                    console_message = self.alert_formatter.format_spike_alert(spike_info, "console")
-                    telegram_message = self.alert_formatter.format_spike_alert(spike_info, "telegram")
+                    # Get volume history for baseline
+                    history = await self.volume_calculator.get_volume_history(
+                        symbol,
+                        current_timestamp,
+                        minutes_back=Config.BASELINE_WINDOW_MINUTES
+                    )
                     
-                    # Console output
-                    logger.info("=" * 60)
-                    logger.info(console_message)
-                    logger.info("=" * 60)
+                    if len(history) < 3:
+                        # Not enough data yet
+                        return
                     
-                    # Send Telegram alert
-                    await self.telegram_bot.send_alert(telegram_message)
+                    # Calculate baseline (exclude current interval)
+                    history_for_baseline = history[:-1] if history else []
+                    baseline_volume = self.baseline_calculator.calculate_baseline(
+                        history_for_baseline,
+                        method="median"
+                    )
                     
-                    # Print stats
-                    logger.info(f"Stats: {self.stats['trades_processed']} trades processed, "
-                              f"{self.stats['alerts_triggered']} alerts triggered")
+                    if baseline_volume <= 0:
+                        return
+                    
+                    # Check for spike
+                    spike_info = self.spike_detector.check_spike(
+                        symbol,
+                        current_volume,
+                        baseline_volume,
+                        current_time
+                    )
+                    
+                    if spike_info:
+                        # Spike detected!
+                        async with self._stats_lock:
+                            self.stats['alerts_triggered'] += 1
+                        
+                        # Get current and baseline prices for price direction
+                        current_price = await self.volume_calculator.get_current_price(symbol, current_timestamp)
+                        baseline_price = await self.volume_calculator.get_baseline_price(
+                            symbol, current_timestamp, minutes_back=Config.BASELINE_WINDOW_MINUTES
+                        )
+                        
+                        # Add price info to spike_info
+                        spike_info['current_price'] = current_price
+                        spike_info['baseline_price'] = baseline_price
+                        
+                        # Format alert messages
+                        console_message = self.alert_formatter.format_spike_alert(spike_info, "console")
+                        telegram_message = self.alert_formatter.format_spike_alert(spike_info, "telegram")
+                        
+                        # Console output
+                        logger.info("=" * 60)
+                        logger.info(console_message)
+                        logger.info("=" * 60)
+                        
+                        # Send Telegram alert
+                        await self.telegram_bot.send_alert(telegram_message)
+                        
+                        # Print stats (thread-safe read)
+                        async with self._stats_lock:
+                            trades_count = self.stats['trades_processed']
+                            alerts_count = self.stats['alerts_triggered']
+                        logger.info(f"Stats: {trades_count} trades processed, "
+                                  f"{alerts_count} alerts triggered")
                 
-            except Exception as e:
-                logger.warning(f"Error checking spike for {symbol}: {e}")
+                except Exception as e:
+                    logger.warning(f"Error checking spike for {symbol}: {e}")
+        
+        # Run all symbol checks in parallel
+        tasks = [check_symbol_spike(symbol) for symbol in symbols]
+        await asyncio.gather(*tasks, return_exceptions=True)
     
     async def run(self):
         """Run the main monitoring loop."""
@@ -191,7 +211,9 @@ class VolumeAlertSystem:
             websocket_task.cancel()
             
             logger.info("System shutdown complete")
-            logger.info(f"Final stats: {self.stats}")
+            async with self._stats_lock:
+                final_stats = self.stats.copy()
+            logger.info(f"Final stats: {final_stats}")
 
 
 async def main():

@@ -2,9 +2,12 @@
 import os
 from typing import Optional
 from dotenv import load_dotenv
+import logging
 
 # Load environment variables
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class Config:
@@ -44,6 +47,32 @@ class Config:
     
     @classmethod
     def validate(cls) -> bool:
-        """Validate required configuration."""
+        """
+        Validate required configuration.
+        
+        Returns:
+            True if configuration is valid, False otherwise
+        """
+        # Validate numeric parameters
+        if cls.MIN_VOLUME_THRESHOLD <= 0:
+            logger.error("MIN_VOLUME_THRESHOLD must be > 0")
+            return False
+        
+        if cls.SPIKE_RATIO_THRESHOLD <= 0:
+            logger.error("SPIKE_RATIO_THRESHOLD must be > 0")
+            return False
+        
+        if cls.BASELINE_WINDOW_MINUTES <= 0:
+            logger.error("BASELINE_WINDOW_MINUTES must be > 0")
+            return False
+        
+        if cls.UPDATE_INTERVAL_SECONDS <= 0:
+            logger.error("UPDATE_INTERVAL_SECONDS must be > 0")
+            return False
+        
+        if cls.MAX_SYMBOLS <= 0:
+            logger.error("MAX_SYMBOLS must be > 0")
+            return False
+        
         # API keys are optional for public data (volume)
         return True

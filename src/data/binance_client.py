@@ -414,22 +414,28 @@ class BinanceFuturesClient:
                         if not self._running:
                             break
                         reconnect_count += 1
-                        # Log ping timeout as debug (not warning) since it's expected behavior
-                        if "ping timeout" in str(e).lower():
-                            # Don't log ping timeout - it's normal and will reconnect
-                            pass
-                        else:
+                        # Suppress ping timeout - it's normal and will reconnect
+                        if "ping timeout" not in str(e).lower():
                             if reconnect_count <= 3:
                                 logger.warning(f"Stream {stream_name} connection closed: {e}, reconnecting... (attempt {reconnect_count})")
+                            # Limit reconnection attempts to prevent infinite loops
+                            if reconnect_count >= Config.MAX_RECONNECT_ATTEMPTS:
+                                logger.error(f"Stream {stream_name} exceeded max reconnection attempts ({Config.MAX_RECONNECT_ATTEMPTS}), stopping")
+                                break
                         await asyncio.sleep(Config.WEBSOCKET_RECONNECT_DELAY)
                     except Exception as e:
                         if not self._running:
                             break
                         reconnect_count += 1
-                        # Suppress ping timeout errors in exception handler too
+                        # Suppress ping timeout errors
                         error_str = str(e).lower()
-                        if "ping timeout" not in error_str and reconnect_count <= 3:
-                            logger.warning(f"Stream {stream_name} error: {e}, reconnecting... (attempt {reconnect_count})")
+                        if "ping timeout" not in error_str:
+                            if reconnect_count <= 3:
+                                logger.warning(f"Stream {stream_name} error: {e}, reconnecting... (attempt {reconnect_count})")
+                            # Limit reconnection attempts
+                            if reconnect_count >= Config.MAX_RECONNECT_ATTEMPTS:
+                                logger.error(f"Stream {stream_name} exceeded max reconnection attempts ({Config.MAX_RECONNECT_ATTEMPTS}), stopping")
+                                break
                         await asyncio.sleep(Config.WEBSOCKET_RECONNECT_DELAY)
             
             task = asyncio.create_task(connect_stream(stream, ws_url, symbol))

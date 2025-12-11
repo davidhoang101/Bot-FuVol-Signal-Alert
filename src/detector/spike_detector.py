@@ -19,6 +19,10 @@ class SpikeDetector:
         
         # Cooldown tracking: {symbol: last_alert_time}
         self.cooldowns: Dict[str, datetime] = {}
+        
+        # Maximum retention for cooldowns (cleanup old entries)
+        # Constant: 24 hours in minutes
+        self.MAX_COOLDOWN_RETENTION_MINUTES = 24 * 60
     
     def check_spike(
         self,
@@ -104,6 +108,9 @@ class SpikeDetector:
     
     def _is_in_cooldown(self, symbol: str, current_time: datetime) -> bool:
         """Check if symbol is in cooldown period."""
+        # Cleanup old cooldowns to prevent memory leak
+        self._cleanup_old_cooldowns(current_time)
+        
         if symbol not in self.cooldowns:
             return False
         
@@ -111,6 +118,23 @@ class SpikeDetector:
         cooldown_delta = timedelta(minutes=Config.COOLDOWN_PERIOD_MINUTES)
         
         return (current_time - last_alert) < cooldown_delta
+    
+    def _cleanup_old_cooldowns(self, current_time: datetime):
+        """Cleanup cooldowns older than retention period to prevent memory leak."""
+        cutoff_time = current_time - timedelta(minutes=self.MAX_COOLDOWN_RETENTION_MINUTES)
+        self.cooldowns = {
+            symbol: alert_time
+            for symbol, alert_time in self.cooldowns.items()
+            if alert_time >= cutoff_time
+        }
+        
+        # Also cleanup recent_spikes for symbols not in cooldowns
+        active_symbols = set(self.cooldowns.keys())
+        self.recent_spikes = {
+            symbol: spikes
+            for symbol, spikes in self.recent_spikes.items()
+            if symbol in active_symbols or len(spikes) > 0
+        }
     
     def get_cooldown_remaining(self, symbol: str, current_time: datetime) -> int:
         """Get remaining cooldown time in minutes."""

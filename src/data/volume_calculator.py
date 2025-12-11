@@ -31,7 +31,9 @@ class VolumeCalculator:
             self.trades[symbol].append((timestamp, price, quantity))
             
             # Clean old trades (older than 2 hours)
-            cutoff_time = timestamp - 7200  # 2 hours
+            # Constant: 2 hours in seconds
+            TRADE_RETENTION_SECONDS = 2 * 60 * 60
+            cutoff_time = timestamp - TRADE_RETENTION_SECONDS
             self.trades[symbol] = [
                 t for t in self.trades[symbol] 
                 if t[0] >= cutoff_time
@@ -51,6 +53,12 @@ class VolumeCalculator:
             
             # Get current interval start
             current_interval = self._get_interval_start(current_time)
+            
+            # Cleanup old intervals (keep only last 3 hours = 36 intervals)
+            # This prevents memory leak from unbounded growth
+            # Constant: 3 hours in seconds
+            INTERVAL_RETENTION_SECONDS = 3 * 60 * 60
+            cleanup_cutoff = current_interval - INTERVAL_RETENTION_SECONDS
             
             # Aggregate trades into intervals
             interval_volumes: Dict[int, float] = defaultdict(float)
@@ -72,6 +80,18 @@ class VolumeCalculator:
             for interval_start, prices in interval_prices.items():
                 if prices:
                     avg_prices[interval_start] = sum(prices) / len(prices)
+            
+            # Cleanup old intervals to prevent memory leak
+            if symbol in self.volume_intervals:
+                self.volume_intervals[symbol] = {
+                    k: v for k, v in self.volume_intervals[symbol].items()
+                    if k >= cleanup_cutoff
+                }
+            if symbol in self.price_intervals:
+                self.price_intervals[symbol] = {
+                    k: v for k, v in self.price_intervals[symbol].items()
+                    if k >= cleanup_cutoff
+                }
             
             # Update stored intervals
             self.volume_intervals[symbol] = dict(interval_volumes)
