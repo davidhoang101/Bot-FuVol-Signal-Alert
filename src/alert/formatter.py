@@ -56,7 +56,9 @@ class AlertFormatter:
             # Telegram format with HTML
             price_info = ""
             if current_price > 0 and baseline_price > 0:
-                price_info = f"\n<b>Price:</b> ${current_price:.4f} {direction_icon} ({change_sign}{price_change_percent:.2f}%)"
+                # Color: green for up, red for down (only for icon and percentage)
+                price_color = "#00ff00" if price_is_up else "#ff0000"  # Green or Red
+                price_info = f"\n<b>Price:</b> ${current_price:.4f} <span style='color: {price_color}'>{direction_icon}</span> <span style='color: {price_color}'>({change_sign}{price_change_percent:.2f}%)</span>"
             
             message = f"""{direction_icon} <b>VOLUME SPIKE ALERT</b> {direction_icon}
 
