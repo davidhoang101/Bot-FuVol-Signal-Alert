@@ -60,6 +60,39 @@ class BinanceFuturesClient:
         self.trade_callbacks: Dict[str, Callable] = {}
         self.reconnect_attempts = 0
         self._running = False
+        
+        # Set up exception handler to prevent "Future exception was never retrieved" warnings
+        # This will catch any unhandled exceptions in tasks
+        def exception_handler(loop, context):
+            """Handle unhandled exceptions in tasks."""
+            exception = context.get('exception')
+            if exception:
+                # Suppress ping timeout and connection closed errors (they're handled by reconnect logic)
+                error_str = str(exception).lower()
+                if "ping timeout" in error_str or "connection closed" in error_str:
+                    # These are expected during reconnection, suppress them
+                    return
+                # Suppress CancelledError (normal during shutdown)
+                if isinstance(exception, asyncio.CancelledError):
+                    return
+                # Log other exceptions at debug level
+                logger.debug(f"Unhandled exception in task: {context.get('message', 'Unknown')}: {exception}")
+            else:
+                # Log other context messages at debug level
+                logger.debug(f"Task context: {context.get('message', 'Unknown')}")
+        
+        # Set the exception handler for the current event loop
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is already running, we'll set it when we start
+                self._exception_handler = exception_handler
+            else:
+                loop.set_exception_handler(exception_handler)
+                self._exception_handler = None
+        except RuntimeError:
+            # No event loop yet, will set it later
+            self._exception_handler = exception_handler
     
     async def initialize(self):
         """Initialize Binance client."""
@@ -228,6 +261,15 @@ class BinanceFuturesClient:
         if not self.client:
             await self.initialize()
         
+        # Set exception handler if we have one and loop is running
+        if hasattr(self, '_exception_handler') and self._exception_handler:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.set_exception_handler(self._exception_handler)
+            except RuntimeError:
+                # No running loop, will be set automatically
+                pass
+        
         try:
             self.socket_manager = BinanceSocketManager(self.client)
             self._running = True
@@ -249,8 +291,21 @@ class BinanceFuturesClient:
             
             logger.info(f"Started {len(tasks)} WebSocket streams for {len(self.symbols)} symbols")
             
-            # Wait for all streams
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Wait for all streams and handle exceptions properly
+            # This prevents "Future exception was never retrieved" warnings
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Consume all exceptions to prevent warnings
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    # Exceptions are already handled in connect_stream, just consume them here
+                    # to prevent "Future exception was never retrieved" warnings
+                    if not isinstance(result, (asyncio.CancelledError, KeyboardInterrupt)):
+                        # Only log non-cancelled exceptions that weren't already handled
+                        error_str = str(result).lower()
+                        if "ping timeout" not in error_str:
+                            stream_idx = i // 20  # Approximate stream index
+                            logger.debug(f"WebSocket task {i} ended with exception: {type(result).__name__}")
             
         except Exception as e:
             logger.error(f"Error starting WebSocket: {e}")
@@ -338,11 +393,17 @@ class BinanceFuturesClient:
                                 break
                             await handle_message(message)
                     finally:
-                        backup_ping_handle.cancel()
-                        try:
-                            await backup_ping_handle
-                        except asyncio.CancelledError:
-                            pass
+                        # Cancel and await backup ping task to prevent "Future exception was never retrieved"
+                        if backup_ping_handle and not backup_ping_handle.done():
+                            backup_ping_handle.cancel()
+                        if backup_ping_handle:
+                            try:
+                                await backup_ping_handle
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as e:
+                                # Consume any exceptions from backup ping task
+                                logger.debug(f"Backup ping task exception (multiplex): {e}")
                     
                     return  # Success, exit function
             except Exception as e:
@@ -359,101 +420,154 @@ class BinanceFuturesClient:
             async def connect_stream(stream_name: str, url: str, sym: str):
                 """Connect to a single stream with manual keepalive ping."""
                 reconnect_count = 0
-                while self._running:
-                    try:
-                        # Use auto ping with settings optimized for Binance
-                        # Binance requires response within 10 minutes, we ping every 20s (more frequent)
-                        async with websockets.connect(
-                            url, 
-                            ssl=ssl_context,
-                            ping_interval=20,     # Auto ping every 20 seconds (more frequent)
-                            ping_timeout=15,      # Wait 15 seconds for pong
-                            close_timeout=10,
-                            max_size=2**23
-                        ) as websocket:
-                            logger.info(f"✅ Connected to {stream_name}")
-                            reconnect_count = 0  # Reset on successful connection
-                            
-                            # Additional manual ping as backup (every 18 seconds)
-                            async def backup_ping_task():
-                                """Backup ping task in case auto ping fails."""
+                backup_ping_handle = None
+                
+                try:
+                    while self._running:
+                        try:
+                            # Use auto ping with settings optimized for Binance
+                            # Binance requires response within 10 minutes, we ping every 20s (more frequent)
+                            async with websockets.connect(
+                                url, 
+                                ssl=ssl_context,
+                                ping_interval=20,     # Auto ping every 20 seconds (more frequent)
+                                ping_timeout=15,      # Wait 15 seconds for pong
+                                close_timeout=10,
+                                max_size=2**23
+                            ) as websocket:
+                                logger.info(f"✅ Connected to {stream_name}")
+                                reconnect_count = 0  # Reset on successful connection
+                                
+                                # Additional manual ping as backup (every 18 seconds)
+                                async def backup_ping_task():
+                                    """Backup ping task in case auto ping fails."""
+                                    try:
+                                        while self._running:
+                                            await asyncio.sleep(18)  # Backup ping every 18 seconds (before auto ping)
+                                            try:
+                                                if not websocket.closed:
+                                                    # Send raw ping frame
+                                                    await websocket.ping()
+                                            except (websockets.exceptions.ConnectionClosed, AttributeError) as e:
+                                                logger.debug(f"Backup ping detected connection closed for {stream_name}: {e}")
+                                                break
+                                            except Exception as e:
+                                                # Log but don't break - auto ping should handle it
+                                                logger.debug(f"Backup ping error for {stream_name}: {e}")
+                                    except asyncio.CancelledError:
+                                        pass
+                                    except Exception as e:
+                                        logger.debug(f"Backup ping task error for {stream_name}: {e}")
+                                
+                                # Start backup ping task
+                                backup_ping_handle = asyncio.create_task(backup_ping_task())
+                                
                                 try:
-                                    while self._running:
-                                        await asyncio.sleep(18)  # Backup ping every 18 seconds (before auto ping)
-                                        try:
-                                            if not websocket.closed:
-                                                # Send raw ping frame
-                                                await websocket.ping()
-                                        except (websockets.exceptions.ConnectionClosed, AttributeError) as e:
-                                            logger.debug(f"Backup ping detected connection closed for {stream_name}: {e}")
+                                    async for message in websocket:
+                                        if not self._running:
                                             break
+                                        await handle_message(message, sym)
+                                finally:
+                                    # Cancel and await backup ping task to prevent "Future exception was never retrieved"
+                                    if backup_ping_handle and not backup_ping_handle.done():
+                                        backup_ping_handle.cancel()
+                                    if backup_ping_handle:
+                                        try:
+                                            await backup_ping_handle
+                                        except asyncio.CancelledError:
+                                            pass
                                         except Exception as e:
-                                            # Log but don't break - auto ping should handle it
-                                            logger.debug(f"Backup ping error for {stream_name}: {e}")
-                                except asyncio.CancelledError:
-                                    pass
-                                except Exception as e:
-                                    logger.debug(f"Backup ping task error for {stream_name}: {e}")
-                            
-                            # Start backup ping task
-                            backup_ping_handle = asyncio.create_task(backup_ping_task())
-                            
-                            try:
-                                async for message in websocket:
-                                    if not self._running:
-                                        break
-                                    await handle_message(message, sym)
-                            finally:
-                                # Cancel backup ping task
-                                backup_ping_handle.cancel()
-                                try:
-                                    await backup_ping_handle
-                                except asyncio.CancelledError:
-                                    pass
-                    except websockets.exceptions.ConnectionClosed as e:
-                        if not self._running:
-                            break
-                        reconnect_count += 1
-                        # Suppress ping timeout - it's normal and will reconnect
-                        if "ping timeout" not in str(e).lower():
-                            if reconnect_count <= 3:
-                                logger.warning(f"Stream {stream_name} connection closed: {e}, reconnecting... (attempt {reconnect_count})")
-                            # Limit reconnection attempts to prevent infinite loops
-                            if reconnect_count >= Config.MAX_RECONNECT_ATTEMPTS:
-                                logger.error(f"Stream {stream_name} exceeded max reconnection attempts ({Config.MAX_RECONNECT_ATTEMPTS}), stopping")
+                                            # Consume any exceptions from backup ping task
+                                            logger.debug(f"Backup ping task exception for {stream_name}: {e}")
+                        except websockets.exceptions.ConnectionClosed as e:
+                            if not self._running:
                                 break
-                        await asyncio.sleep(Config.WEBSOCKET_RECONNECT_DELAY)
-                    except Exception as e:
-                        if not self._running:
-                            break
-                        reconnect_count += 1
-                        # Suppress ping timeout errors
-                        error_str = str(e).lower()
-                        if "ping timeout" not in error_str:
-                            if reconnect_count <= 3:
-                                logger.warning(f"Stream {stream_name} error: {e}, reconnecting... (attempt {reconnect_count})")
-                            # Limit reconnection attempts
-                            if reconnect_count >= Config.MAX_RECONNECT_ATTEMPTS:
-                                logger.error(f"Stream {stream_name} exceeded max reconnection attempts ({Config.MAX_RECONNECT_ATTEMPTS}), stopping")
+                            reconnect_count += 1
+                            # Suppress ping timeout - it's normal and will reconnect
+                            error_msg = str(e).lower()
+                            if "ping timeout" not in error_msg:
+                                if reconnect_count <= 3:
+                                    logger.warning(f"Stream {stream_name} connection closed: {e}, reconnecting... (attempt {reconnect_count})")
+                                # Limit reconnection attempts to prevent infinite loops
+                                if reconnect_count >= Config.MAX_RECONNECT_ATTEMPTS:
+                                    logger.error(f"Stream {stream_name} exceeded max reconnection attempts ({Config.MAX_RECONNECT_ATTEMPTS}), stopping")
+                                    break
+                            await asyncio.sleep(Config.WEBSOCKET_RECONNECT_DELAY)
+                        except Exception as e:
+                            if not self._running:
                                 break
-                        await asyncio.sleep(Config.WEBSOCKET_RECONNECT_DELAY)
+                            reconnect_count += 1
+                            # Suppress ping timeout errors
+                            error_str = str(e).lower()
+                            if "ping timeout" not in error_str:
+                                if reconnect_count <= 3:
+                                    logger.warning(f"Stream {stream_name} error: {e}, reconnecting... (attempt {reconnect_count})")
+                                # Limit reconnection attempts
+                                if reconnect_count >= Config.MAX_RECONNECT_ATTEMPTS:
+                                    logger.error(f"Stream {stream_name} exceeded max reconnection attempts ({Config.MAX_RECONNECT_ATTEMPTS}), stopping")
+                                    break
+                            await asyncio.sleep(Config.WEBSOCKET_RECONNECT_DELAY)
+                except asyncio.CancelledError:
+                    # Task was cancelled, clean up
+                    if backup_ping_handle and not backup_ping_handle.done():
+                        backup_ping_handle.cancel()
+                    if backup_ping_handle:
+                        try:
+                            await backup_ping_handle
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    raise
+                except Exception as e:
+                    # Final exception handler - ensure all exceptions are consumed
+                    if backup_ping_handle and not backup_ping_handle.done():
+                        backup_ping_handle.cancel()
+                    if backup_ping_handle:
+                        try:
+                            await backup_ping_handle
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    # Log only if it's not a ping timeout
+                    error_str = str(e).lower()
+                    if "ping timeout" not in error_str and "connection closed" not in error_str:
+                        logger.debug(f"Stream {stream_name} final exception: {e}")
+                    # Re-raise to be caught by gather()
+                    raise
             
-            task = asyncio.create_task(connect_stream(stream, ws_url, symbol))
+            # Create task with proper exception handling wrapper
+            async def safe_connect_stream():
+                """Wrapper to ensure all exceptions are handled."""
+                try:
+                    await connect_stream(stream, ws_url, symbol)
+                except asyncio.CancelledError:
+                    # Task cancellation is normal during shutdown
+                    pass
+                except websockets.exceptions.ConnectionClosed as e:
+                    # Connection closed is handled by reconnect logic, just consume here
+                    error_str = str(e).lower()
+                    if "ping timeout" not in error_str:
+                        logger.debug(f"Stream {stream} connection closed: {type(e).__name__}")
+                except Exception as e:
+                    # All other exceptions should be consumed to prevent warnings
+                    error_str = str(e).lower()
+                    if "ping timeout" not in error_str and "connection closed" not in error_str:
+                        logger.debug(f"Stream {stream} exception: {type(e).__name__}: {e}")
+            
+            task = asyncio.create_task(safe_connect_stream())
             tasks.append(task)
         
         # Wait for all individual streams and handle exceptions
+        # All exceptions are already handled in safe_connect_stream wrapper
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Log any exceptions that occurred (but suppress ping timeout)
+        # Consume all exceptions to prevent "Future exception was never retrieved" warnings
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                stream_name = streams[i] if i < len(streams) else f"stream_{i}"
-                # Suppress ping timeout and connection closed errors (they're handled by reconnect logic)
-                if isinstance(result, (asyncio.CancelledError, websockets.exceptions.ConnectionClosed)):
-                    continue
-                error_str = str(result).lower()
-                if "ping timeout" not in error_str:
-                    logger.error(f"Stream {stream_name} task failed: {result}", exc_info=result)
+                # Exceptions are already handled in safe_connect_stream, just consume them
+                if not isinstance(result, (asyncio.CancelledError, KeyboardInterrupt)):
+                    error_str = str(result).lower()
+                    if "ping timeout" not in error_str:
+                        stream_name = streams[i] if i < len(streams) else f"stream_{i}"
+                        logger.debug(f"WebSocket task {i} ({stream_name}) ended: {type(result).__name__}")
     
     async def get_klines(self, symbol: str, interval: str = "5m", limit: int = 12) -> List[Dict]:
         """Get historical klines (candlestick data) with rate limiting."""
