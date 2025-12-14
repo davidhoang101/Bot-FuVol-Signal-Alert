@@ -1,7 +1,7 @@
 """Main entry point for volume alert system."""
 import asyncio
 import signal
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict
 
 from src.utils.config import Config
@@ -83,7 +83,7 @@ class VolumeAlertSystem:
     
     async def check_spikes(self):
         """Check for volume spikes across all symbols."""
-        current_time = datetime.utcnow()
+        current_time = datetime.now(timezone.utc)
         current_timestamp = current_time.timestamp()
         
         symbols = await self.volume_calculator.get_all_symbols()

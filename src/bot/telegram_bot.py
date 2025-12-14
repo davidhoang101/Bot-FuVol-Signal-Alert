@@ -2,11 +2,11 @@
 import asyncio
 from typing import Optional, List, Callable
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     from telegram import Bot, Update
-    from telegram.error import TelegramError, RetryAfter, TimedOut
+    from telegram.error import TelegramError, RetryAfter, TimedOut, Conflict
     from telegram.ext import Application, CommandHandler, ContextTypes
 except ImportError:
     Bot = None
@@ -14,6 +14,7 @@ except ImportError:
     TelegramError = Exception
     RetryAfter = Exception
     TimedOut = Exception
+    Conflict = Exception
     Application = None
     CommandHandler = None
     ContextTypes = None
@@ -98,6 +99,10 @@ class TelegramAlertBot:
                     else:
                         logger.warning("TELEGRAM_CHAT_ID not set and no updates found.")
                         logger.warning("Please send a message to your bot first, or set TELEGRAM_CHAT_ID in .env")
+                except Conflict as e:
+                    # Another bot instance is running - this is expected in production
+                    logger.warning(f"Telegram bot conflict when getting updates (another instance running): {e}")
+                    logger.warning("Please set TELEGRAM_CHAT_ID in .env file to use alerts")
                 except Exception as e:
                     logger.warning(f"Could not get chat IDs from updates: {e}")
                     logger.warning("Please set TELEGRAM_CHAT_ID in .env file")
@@ -121,6 +126,10 @@ class TelegramAlertBot:
             if self.application:
                 await self.application.updater.start_polling(drop_pending_updates=True)
                 logger.info("Telegram bot polling started")
+        except Conflict as e:
+            # Another bot instance is running - this is expected in production
+            logger.warning(f"Telegram bot conflict (another instance running): {e}")
+            logger.info("Bot will continue running but command polling is disabled")
         except Exception as e:
             logger.error(f"Error in polling: {e}")
     
@@ -188,7 +197,7 @@ The bot will automatically send alerts when volume spikes are detected (volume i
             return
         
         try:
-            current_time = datetime.utcnow().timestamp()
+            current_time = datetime.now(timezone.utc).timestamp()
             top_volumes = await self._volume_calculator.get_top_volumes(current_time, top_n=10)
             
             if not top_volumes:
@@ -202,7 +211,7 @@ The bot will automatically send alerts when volume spikes are detected (volume i
                 vol_str = self._format_volume(volume)
                 message += f"{i}. <b>{symbol}</b>: {vol_str} USDT\n"
             
-            message += f"\n<i>Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
+            message += f"\n<i>Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
             
             await update.message.reply_text(message, parse_mode='HTML')
             
@@ -265,7 +274,7 @@ The bot will automatically send alerts when volume spikes are detected (volume i
                 message += f"{i}. <b>{symbol}</b>\n"
                 message += f"   💰 {price_str} | 📈 +{change_pct:.2f}% | 📊 Vol: {vol_str}\n\n"
             
-            message += f"<i>Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
+            message += f"<i>Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
             
             await update.message.reply_text(message, parse_mode='HTML')
             
