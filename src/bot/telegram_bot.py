@@ -230,6 +230,8 @@ I will send alerts when volume spikes are detected on Binance Futures.
             
             # Calculate spike ratio for each symbol
             spike_data = []
+            fallback_volume_data = []  # Fallback if not enough baseline data
+            
             for symbol in symbols:
                 try:
                     # Get current volume
@@ -245,7 +247,15 @@ I will send alerts when volume spikes are detected on Binance Futures.
                         minutes_back=Config.BASELINE_WINDOW_MINUTES
                     )
                     
-                    if len(history) < 3:
+                    # Need at least 2 intervals (1 for baseline, 1 current)
+                    if len(history) < 2:
+                        # Fallback: use absolute volume
+                        fallback_volume_data.append({
+                            'symbol': symbol,
+                            'current_volume': current_volume,
+                            'baseline_volume': 0,
+                            'spike_ratio': 0
+                        })
                         continue
                     
                     # Calculate baseline (exclude current interval)
@@ -256,6 +266,13 @@ I will send alerts when volume spikes are detected on Binance Futures.
                     )
                     
                     if baseline_volume <= 0:
+                        # Fallback: use absolute volume
+                        fallback_volume_data.append({
+                            'symbol': symbol,
+                            'current_volume': current_volume,
+                            'baseline_volume': 0,
+                            'spike_ratio': 0
+                        })
                         continue
                     
                     # Calculate spike ratio
@@ -271,9 +288,33 @@ I will send alerts when volume spikes are detected on Binance Futures.
                     logger.debug(f"Error calculating spike for {symbol}: {e}")
                     continue
             
+            # If no spike data, use fallback (absolute volume)
             if not spike_data:
-                await update.message.reply_text("📊 No spike data available yet. Please wait a moment...")
-                return
+                if fallback_volume_data:
+                    # Sort by absolute volume
+                    fallback_volume_data.sort(key=lambda x: x['current_volume'], reverse=True)
+                    top_spikes = fallback_volume_data[:10]
+                    
+                    message = "📊 <b>TOP 10 PAIRS - HIGHEST VOLUME (5 minutes)</b>\n"
+                    message += "<i>⚠️ Not enough data for spike calculation, showing absolute volume</i>\n\n"
+                    
+                    for i, data in enumerate(top_spikes, 1):
+                        symbol = data['symbol']
+                        current_vol = data['current_volume']
+                        vol_str = self._format_volume(current_vol)
+                        binance_link = f"https://www.binance.com/en/futures/{symbol}"
+                        
+                        message += f"{i}. <a href=\"{binance_link}\"><b>{symbol}</b></a>\n"
+                        message += f"   📊 Vol: {vol_str} USDT\n\n"
+                    
+                    message += f"<i>Time: {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
+                    await update.message.reply_text(message, parse_mode='HTML')
+                    return
+                else:
+                    await update.message.reply_text(
+                        "📊 No volume data available yet. Please wait a few minutes for data to accumulate..."
+                    )
+                    return
             
             # Sort by spike ratio (descending)
             spike_data.sort(key=lambda x: x['spike_ratio'], reverse=True)
