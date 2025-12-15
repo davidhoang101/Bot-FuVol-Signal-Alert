@@ -63,6 +63,16 @@ class TelegramAlertBot:
             bot_info = await self.bot.get_me()
             logger.info(f"✅ Telegram bot initialized: @{bot_info.username}")
             
+            # Ensure webhook is deleted before starting polling
+            try:
+                webhook_info = await self.bot.get_webhook_info()
+                if webhook_info.url:
+                    logger.warning(f"Webhook detected: {webhook_info.url}. Deleting to enable polling...")
+                    await self.bot.delete_webhook(drop_pending_updates=True)
+                    logger.info("✅ Webhook deleted, polling mode enabled")
+            except Exception as e:
+                logger.debug(f"Error checking/deleting webhook: {e}")
+            
             # Initialize application for command handling
             self.application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
             
@@ -122,23 +132,62 @@ class TelegramAlertBot:
     
     async def _run_polling(self):
         """Run polling for commands in background."""
-        try:
-            if self.application:
-                await self.application.updater.start_polling(drop_pending_updates=True)
-                logger.info("Telegram bot polling started")
-        except Conflict as e:
-            # Another bot instance is running - this is expected in production
-            logger.warning(f"Telegram bot conflict (another instance running): {e}")
-            logger.info("Bot will continue running but command polling is disabled")
-        except Exception as e:
-            logger.error(f"Error in polling: {e}")
+        max_retries = 3
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                if self.application:
+                    # Ensure webhook is deleted before polling
+                    try:
+                        webhook_info = await self.bot.get_webhook_info()
+                        if webhook_info.url:
+                            logger.warning(f"Attempt {attempt + 1}: Webhook still exists, deleting...")
+                            await self.bot.delete_webhook(drop_pending_updates=True)
+                            await asyncio.sleep(1)  # Wait a bit after deleting webhook
+                    except Exception as e:
+                        logger.debug(f"Error checking webhook: {e}")
+                    
+                    await self.application.updater.start_polling(
+                        drop_pending_updates=True,
+                        allowed_updates=["message", "edited_message"]
+                    )
+                    logger.info("✅ Telegram bot polling started successfully")
+                    return  # Success, exit retry loop
+                    
+            except Conflict as e:
+                # Another bot instance is running or webhook conflict
+                logger.warning(f"Telegram bot conflict (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                    # Try to delete webhook again
+                    try:
+                        await self.bot.delete_webhook(drop_pending_updates=True)
+                        logger.info("Webhook deleted, retrying polling...")
+                    except Exception as del_error:
+                        logger.debug(f"Error deleting webhook on retry: {del_error}")
+                else:
+                    logger.error("❌ Failed to start polling after all retries. Commands will not work.")
+                    logger.error("Please ensure no webhook is set and no other bot instance is running.")
+                    
+            except Exception as e:
+                logger.error(f"Error in polling (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error("❌ Failed to start polling after all retries.")
     
     async def _handle_start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
+        logger.info(f"📥 Received /start command")
         if not update or not update.message:
+            logger.warning("Update or message is None")
             return
         
         chat_id = str(update.message.chat.id)
+        logger.info(f"Processing /start from chat ID: {chat_id}")
         if chat_id not in self.chat_ids:
             self.chat_ids.append(chat_id)
             logger.info(f"Added new chat ID: {chat_id}")
@@ -189,7 +238,9 @@ The bot will automatically send alerts when volume spikes are detected (volume i
     
     async def _handle_top10_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /top10 command."""
+        logger.info(f"📥 Received /top10 command")
         if not update or not update.message:
+            logger.warning("Update or message is None")
             return
         
         if not self._volume_calculator:
@@ -221,7 +272,9 @@ The bot will automatically send alerts when volume spikes are detected (volume i
     
     async def _handle_topgainers_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /topgainers command."""
+        logger.info(f"📥 Received /topgainers command")
         if not update or not update.message:
+            logger.warning("Update or message is None")
             return
         
         if not self._binance_client:
