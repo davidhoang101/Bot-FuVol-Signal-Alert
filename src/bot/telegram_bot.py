@@ -76,14 +76,12 @@ class TelegramAlertBot:
             # Initialize application for command handling
             self.application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
             
-            # Add command handlers
+            # Add command handlers - only top10 and topgainers
             if CommandHandler:
                 self.application.add_handler(CommandHandler("top10", self._handle_top10_command))
-                self.application.add_handler(CommandHandler("voltop", self._handle_top10_command))
                 self.application.add_handler(CommandHandler("topgainers", self._handle_topgainers_command))
-                self.application.add_handler(CommandHandler("gainers", self._handle_topgainers_command))
+                # Keep start command for adding chat IDs, but simplified
                 self.application.add_handler(CommandHandler("start", self._handle_start_command))
-                self.application.add_handler(CommandHandler("help", self._handle_help_command))
             
             # Get chat IDs (if specified, or try to get from recent updates)
             if Config.TELEGRAM_CHAT_ID:
@@ -198,41 +196,7 @@ I will send alerts when volume spikes are detected on Binance Futures.
 
 <b>Commands:</b>
 /top10 - Top 10 pairs with highest volume (5 minutes)
-/voltop - Same as /top10
-/topgainers - Top 15 tokens with highest 24h price increase
-/gainers - Same as /topgainers
-/help - Show help
-
-Start monitoring volume spikes! 🚀"""
-        
-        await update.message.reply_text(message, parse_mode='HTML')
-    
-    async def _handle_help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /help command."""
-        if not update or not update.message:
-            return
-        
-        message = """📖 <b>Usage Guide</b>
-
-<b>Commands:</b>
-• <code>/top10</code> or <code>/voltop</code> - View top 10 pairs with highest volume in the last 5 minutes
-• <code>/topgainers</code> or <code>/gainers</code> - View top 15 tokens with highest 24h price increase
-• <code>/start</code> - Start the bot
-• <code>/help</code> - Show this help message
-
-<b>Alerts:</b>
-The bot will automatically send alerts when volume spikes are detected (volume increases ≥{spike_ratio}x compared to baseline).
-
-<b>Configuration:</b>
-• Min Volume Threshold: {min_vol:,.0f} USDT
-• Spike Ratio Threshold: {spike_ratio}x
-• Baseline Window: {baseline_window} minutes
-• Cooldown Period: {cooldown} minutes""".format(
-            min_vol=Config.MIN_VOLUME_THRESHOLD,
-            spike_ratio=Config.SPIKE_RATIO_THRESHOLD,
-            baseline_window=Config.BASELINE_WINDOW_MINUTES,
-            cooldown=Config.COOLDOWN_PERIOD_MINUTES
-        )
+/topgainers - Top 15 tokens with highest 24h price increase"""
         
         await update.message.reply_text(message, parse_mode='HTML')
     

@@ -627,7 +627,10 @@ class BinanceFuturesClient:
                 tickers = [tickers]
             
             # Convert to list of dicts with normalized keys
+            # Only include symbols that are in our monitored futures symbols list
             result = []
+            monitored_symbols = set(self.symbols) if self.symbols else set()
+            
             for ticker in tickers:
                 # Handle different response formats
                 symbol = ticker.get('symbol', '')
@@ -635,7 +638,8 @@ class BinanceFuturesClient:
                 last_price = float(ticker.get('lastPrice', ticker.get('c', 0)))
                 volume_24h = float(ticker.get('quoteVolume', ticker.get('qv', 0)))
                 
-                if symbol and price_change_percent != 0:
+                # Only include if symbol is in our monitored futures symbols
+                if symbol and symbol in monitored_symbols and price_change_percent != 0:
                     result.append({
                         'symbol': symbol,
                         'priceChangePercent': price_change_percent,
@@ -643,6 +647,7 @@ class BinanceFuturesClient:
                         'volume24h': volume_24h
                     })
             
+            logger.debug(f"Filtered 24h tickers: {len(result)} out of {len(tickers)} (only futures symbols)")
             return result
             
         except BinanceAPIException as e:
