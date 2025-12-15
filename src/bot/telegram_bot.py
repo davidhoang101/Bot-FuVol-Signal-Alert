@@ -21,6 +21,7 @@ except ImportError:
 
 from src.utils.config import Config
 from src.utils.logger import setup_logger
+from src.detector.baseline import BaselineCalculator
 
 logger = setup_logger(__name__)
 
@@ -36,6 +37,7 @@ class TelegramAlertBot:
         self._initialized = False
         self._volume_calculator = None  # Will be set by main system
         self._binance_client = None  # Will be set by main system
+        self._baseline_calculator = None  # Will be set by main system
         self._command_handler_task = None
     
     def set_volume_calculator(self, volume_calculator):
@@ -45,6 +47,10 @@ class TelegramAlertBot:
     def set_binance_client(self, binance_client):
         """Set Binance client for command handlers."""
         self._binance_client = binance_client
+    
+    def set_baseline_calculator(self, baseline_calculator):
+        """Set baseline calculator for command handlers."""
+        self._baseline_calculator = baseline_calculator
     
     async def initialize(self):
         """Initialize Telegram bot."""
@@ -195,38 +201,105 @@ class TelegramAlertBot:
 I will send alerts when volume spikes are detected on Binance Futures.
 
 <b>Commands:</b>
-/top10 - Top 10 pairs with highest volume (5 minutes)
+/top10 - Top 10 pairs with highest volume spike (5 minutes)
 /topgainers - Top 15 tokens with highest 24h price increase"""
         
         await update.message.reply_text(message, parse_mode='HTML')
     
     async def _handle_top10_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /top10 command."""
+        """Handle /top10 command - shows top 10 pairs with highest volume spike."""
         logger.info(f"📥 Received /top10 command")
         if not update or not update.message:
             logger.warning("Update or message is None")
             return
         
-        if not self._volume_calculator:
-            await update.message.reply_text("❌ Volume calculator not initialized. Please try again later.")
+        if not self._volume_calculator or not self._baseline_calculator:
+            await update.message.reply_text("❌ Volume calculator or baseline calculator not initialized. Please try again later.")
             return
         
         try:
-            current_time = datetime.now(timezone.utc).timestamp()
-            top_volumes = await self._volume_calculator.get_top_volumes(current_time, top_n=10)
+            current_time = datetime.now(timezone.utc)
+            current_timestamp = current_time.timestamp()
             
-            if not top_volumes:
+            # Get all symbols with trade data
+            symbols = await self._volume_calculator.get_all_symbols()
+            
+            if not symbols:
                 await update.message.reply_text("📊 No volume data available yet. Please wait a moment...")
                 return
             
+            # Calculate spike ratio for each symbol
+            spike_data = []
+            for symbol in symbols:
+                try:
+                    # Get current volume
+                    current_volume = await self._volume_calculator.get_current_volume(symbol, current_timestamp)
+                    
+                    if current_volume == 0:
+                        continue
+                    
+                    # Get volume history for baseline
+                    history = await self._volume_calculator.get_volume_history(
+                        symbol,
+                        current_timestamp,
+                        minutes_back=Config.BASELINE_WINDOW_MINUTES
+                    )
+                    
+                    if len(history) < 3:
+                        continue
+                    
+                    # Calculate baseline (exclude current interval)
+                    history_for_baseline = history[:-1] if history else []
+                    baseline_volume = self._baseline_calculator.calculate_baseline(
+                        history_for_baseline,
+                        method="median"
+                    )
+                    
+                    if baseline_volume <= 0:
+                        continue
+                    
+                    # Calculate spike ratio
+                    spike_ratio = current_volume / baseline_volume
+                    
+                    spike_data.append({
+                        'symbol': symbol,
+                        'current_volume': current_volume,
+                        'baseline_volume': baseline_volume,
+                        'spike_ratio': spike_ratio
+                    })
+                except Exception as e:
+                    logger.debug(f"Error calculating spike for {symbol}: {e}")
+                    continue
+            
+            if not spike_data:
+                await update.message.reply_text("📊 No spike data available yet. Please wait a moment...")
+                return
+            
+            # Sort by spike ratio (descending)
+            spike_data.sort(key=lambda x: x['spike_ratio'], reverse=True)
+            
+            # Get top 10
+            top_spikes = spike_data[:10]
+            
             # Format message
-            message = "📊 <b>TOP 10 PAIRS WITH HIGHEST VOLUME (5 minutes)</b>\n\n"
+            message = "📊 <b>TOP 10 PAIRS - HIGHEST VOLUME SPIKE (5 minutes)</b>\n\n"
             
-            for i, (symbol, volume) in enumerate(top_volumes, 1):
-                vol_str = self._format_volume(volume)
-                message += f"{i}. <b>{symbol}</b>: {vol_str} USDT\n"
+            for i, data in enumerate(top_spikes, 1):
+                symbol = data['symbol']
+                current_vol = data['current_volume']
+                baseline_vol = data['baseline_volume']
+                spike_ratio = data['spike_ratio']
+                
+                vol_str = self._format_volume(current_vol)
+                baseline_str = self._format_volume(baseline_vol)
+                
+                # Binance Futures link
+                binance_link = f"https://www.binance.com/en/futures/{symbol}"
+                
+                message += f"{i}. <a href=\"{binance_link}\"><b>{symbol}</b></a>\n"
+                message += f"   📊 Vol: {vol_str} | Baseline: {baseline_str} | 🔥 {spike_ratio:.2f}x\n\n"
             
-            message += f"\n<i>Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
+            message += f"<i>Time: {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
             
             await update.message.reply_text(message, parse_mode='HTML')
             
@@ -288,7 +361,10 @@ I will send alerts when volume spikes are detected on Binance Futures.
                 # Format volume
                 vol_str = self._format_volume(vol_24h)
                 
-                message += f"{i}. <b>{symbol}</b>\n"
+                # Binance Futures link
+                binance_link = f"https://www.binance.com/en/futures/{symbol}"
+                
+                message += f"{i}. <a href=\"{binance_link}\"><b>{symbol}</b></a>\n"
                 message += f"   💰 {price_str} | 📈 +{change_pct:.2f}% | 📊 Vol: {vol_str}\n\n"
             
             message += f"<i>Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"

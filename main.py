@@ -51,6 +51,7 @@ class VolumeAlertSystem:
         # Initialize Telegram bot
         self.telegram_bot.set_volume_calculator(self.volume_calculator)
         self.telegram_bot.set_binance_client(self.binance_client)
+        self.telegram_bot.set_baseline_calculator(self.baseline_calculator)
         telegram_enabled = await self.telegram_bot.initialize()
         if telegram_enabled:
             logger.info("Telegram alerts enabled")
