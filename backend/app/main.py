@@ -34,7 +34,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
+# Include routers (must be before catch-all route)
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(config.router, prefix="/api/config", tags=["config"])
 app.include_router(markets.router, prefix="/api/markets", tags=["markets"])
@@ -50,7 +50,12 @@ app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
 # Calculate path: backend/app/main.py -> backend -> root -> frontend/dist
 frontend_dist = Path(__file__).parent.parent.parent.parent / "frontend" / "dist"
 
-# Serve frontend static files (define route at module level)
+# Mount static assets if they exist (must be before catch-all route)
+static_dir = frontend_dist / "assets"
+if static_dir.exists():
+    app.mount("/assets", StaticFiles(directory=str(static_dir)), name="assets")
+
+# Serve frontend static files (catch-all route - must be LAST)
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
     """Serve frontend app for all non-API routes."""
@@ -65,21 +70,30 @@ async def serve_frontend(full_path: str):
             content={
                 "error": "Frontend not built",
                 "message": "Please build frontend first: cd frontend && npm run build",
-                "path": str(frontend_dist)
+                "path": str(frontend_dist),
+                "current_dir": str(Path.cwd())
             }
         )
     
-    # Serve static files if they exist
-    requested_file = frontend_dist / full_path
-    if full_path and requested_file.exists() and requested_file.is_file():
-        return FileResponse(str(requested_file))
+    # Serve static files if they exist (CSS, JS, images, etc.)
+    if full_path and full_path != "":
+        requested_file = frontend_dist / full_path
+        if requested_file.exists() and requested_file.is_file():
+            return FileResponse(str(requested_file))
     
-    # For SPA routing, serve index.html
+    # For SPA routing, serve index.html for all other routes
     index_path = frontend_dist / "index.html"
     if index_path.exists():
         return FileResponse(str(index_path))
     
-    return JSONResponse(status_code=404, content={"error": "Frontend file not found"})
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "Frontend file not found",
+            "requested": full_path,
+            "dist_path": str(frontend_dist)
+        }
+    )
 
 
 @app.on_event("startup")
@@ -88,27 +102,22 @@ async def startup_event():
     logger = logging.getLogger(__name__)
     logger.info("Starting up application...")
     
-    # Setup frontend static files serving
+    # Log frontend status
     logger.info(f"Checking for frontend at: {frontend_dist}")
     logger.info(f"Frontend dist exists: {frontend_dist.exists()}")
+    logger.info(f"Current working directory: {os.getcwd()}")
     
     if frontend_dist.exists() and (frontend_dist / "index.html").exists():
-        logger.info(f"✅ Serving frontend from {frontend_dist}")
-        
-        # Mount static assets
+        logger.info(f"✅ Frontend found at {frontend_dist}")
         static_dir = frontend_dist / "assets"
         if static_dir.exists():
-            logger.info(f"Mounting static assets from {static_dir}")
-            app.mount("/assets", StaticFiles(directory=str(static_dir)), name="assets")
+            logger.info(f"✅ Static assets directory found: {static_dir}")
         else:
-            logger.warning(f"Static assets directory not found: {static_dir}")
-        
-        # Serve index.html for all non-API routes (must be defined at module level, not in startup)
-        # We'll handle this with a catch-all route
+            logger.warning(f"⚠️ Static assets directory not found: {static_dir}")
     else:
-        logger.warning(f"⚠️ Frontend dist not found at {frontend_dist}, serving API only")
-        logger.info(f"Current working directory: {os.getcwd()}")
-        logger.info(f"Files in frontend directory: {list((frontend_dist.parent).iterdir()) if frontend_dist.parent.exists() else 'N/A'}")
+        logger.warning(f"⚠️ Frontend dist not found at {frontend_dist}")
+        if frontend_dist.parent.exists():
+            logger.info(f"Files in frontend directory: {[f.name for f in frontend_dist.parent.iterdir()]}")
     
     # Initialize database
     try:
