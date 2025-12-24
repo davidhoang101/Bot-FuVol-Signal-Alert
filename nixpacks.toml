@@ -1,16 +1,15 @@
 # Nixpacks configuration for Railway
 # This ensures both Node.js and Python are available
-# Note: pip comes with python311, no need to specify separately
+# Use "..." to extend auto-detected packages
 
 [phases.setup]
-nixPkgs = ["nodejs_20", "python311"]
+nixPkgs = ["...", "nodejs_20", "python311", "python311Packages.pip"]
 
 [phases.install]
 cmds = [
   "npm install",
   "cd frontend && npm install",
-  "python3 -m ensurepip --upgrade",
-  "python3 -m pip install -r backend/requirements.txt"
+  "pip install -r backend/requirements.txt"
 ]
 
 [phases.build]
