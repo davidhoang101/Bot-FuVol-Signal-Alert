@@ -1,9 +1,9 @@
 # Nixpacks configuration for Railway
 # This ensures both Node.js and Python are available
-# Use "..." to extend auto-detected packages
+# Explicitly specify Node.js 20 to avoid conflicts with auto-detected Node.js 24
 
 [phases.setup]
-nixPkgs = ["...", "nodejs_20", "python311", "python311Packages.pip"]
+nixPkgs = ["nodejs_20", "python311", "python311Packages.pip"]
 
 [phases.install]
 cmds = [

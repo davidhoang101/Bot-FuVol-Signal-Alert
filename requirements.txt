@@ -29,3 +29,10 @@ python-telegram-bot==20.7
 # Optional: Redis for caching (can be added later)
 # redis==5.0.1
 # aioredis==2.0.1
+
+# Ethereum and web scraping
+requests==2.31.0
+eth-account==0.9.0
+web3==6.11.3
+beautifulsoup4==4.12.2
+lxml==4.9.3

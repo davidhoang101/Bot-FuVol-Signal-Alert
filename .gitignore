@@ -70,3 +70,6 @@ dump.rdb
 .coverage
 htmlcov/
 
+# Cache files
+scanned_addresses.json
+
