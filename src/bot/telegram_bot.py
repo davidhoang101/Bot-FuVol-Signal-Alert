@@ -5,12 +5,14 @@ import logging
 from datetime import datetime, timezone
 
 try:
-    from telegram import Bot, Update
+    from telegram import Bot, Update, ReplyKeyboardMarkup, KeyboardButton
     from telegram.error import TelegramError, RetryAfter, TimedOut, Conflict
-    from telegram.ext import Application, CommandHandler, ContextTypes
+    from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 except ImportError:
     Bot = None
     Update = None
+    ReplyKeyboardMarkup = None
+    KeyboardButton = None
     TelegramError = Exception
     RetryAfter = Exception
     TimedOut = Exception
@@ -18,6 +20,8 @@ except ImportError:
     Application = None
     CommandHandler = None
     ContextTypes = None
+    MessageHandler = None
+    filters = None
 
 from src.utils.config import Config
 from src.utils.logger import setup_logger
@@ -38,7 +42,13 @@ class TelegramAlertBot:
         self._volume_calculator = None  # Will be set by main system
         self._binance_client = None  # Will be set by main system
         self._baseline_calculator = None  # Will be set by main system
+        self._funding_scanner = None  # Will be set by main system
         self._command_handler_task = None
+        self._menu_labels = {
+            "top10": "📊 Top 10 volume spike (5m)",
+            "topgainers": "📈 Top gainers (24h)",
+            "funding": "💰 Funding rates scan",
+        }
     
     def set_volume_calculator(self, volume_calculator):
         """Set volume calculator for command handlers."""
@@ -51,6 +61,10 @@ class TelegramAlertBot:
     def set_baseline_calculator(self, baseline_calculator):
         """Set baseline calculator for command handlers."""
         self._baseline_calculator = baseline_calculator
+    
+    def set_funding_scanner(self, funding_scanner):
+        """Set funding scanner for command handlers."""
+        self._funding_scanner = funding_scanner
     
     async def initialize(self):
         """Initialize Telegram bot."""
@@ -82,12 +96,18 @@ class TelegramAlertBot:
             # Initialize application for command handling
             self.application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
             
-            # Add command handlers - only top10 and topgainers
-            if CommandHandler:
+            # Add handlers - commands + clickable menu
+            if CommandHandler and MessageHandler and filters:
                 self.application.add_handler(CommandHandler("top10", self._handle_top10_command))
                 self.application.add_handler(CommandHandler("topgainers", self._handle_topgainers_command))
+                self.application.add_handler(CommandHandler("funding", self._handle_funding_command))
+                self.application.add_handler(CommandHandler("topfunding", self._handle_topfunding_command))
                 # Keep start command for adding chat IDs, but simplified
                 self.application.add_handler(CommandHandler("start", self._handle_start_command))
+                # Menu clicks: any normal text (not a command)
+                self.application.add_handler(
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_menu_click)
+                )
             
             # Get chat IDs (if specified, or try to get from recent updates)
             if Config.TELEGRAM_CHAT_ID:
@@ -126,6 +146,26 @@ class TelegramAlertBot:
                 await self.application.initialize()
                 await self.application.start()
                 self._command_handler_task = asyncio.create_task(self._run_polling())
+
+                # Optional: auto-push scan summary (Top10) periodically
+                if Config.TELEGRAM_AUTO_TOP10_INTERVAL_MINUTES > 0:
+                    try:
+                        interval_seconds = Config.TELEGRAM_AUTO_TOP10_INTERVAL_MINUTES * 60
+                        if getattr(self.application, "job_queue", None):
+                            self.application.job_queue.run_repeating(
+                                self._job_send_top10_summary,
+                                interval=interval_seconds,
+                                first=10,  # wait a bit after startup
+                                name="auto_top10_summary",
+                            )
+                            logger.info(
+                                "✅ Auto Top10 summary enabled every %s minutes",
+                                Config.TELEGRAM_AUTO_TOP10_INTERVAL_MINUTES,
+                            )
+                        else:
+                            logger.warning("Job queue not available; cannot schedule auto Top10 summary")
+                    except Exception as e:
+                        logger.warning(f"Failed to schedule auto Top10 summary: {e}")
             
             self._initialized = True
             return True
@@ -202,9 +242,52 @@ I will send alerts when volume spikes are detected on Binance Futures.
 
 <b>Commands:</b>
 /top10 - Top 10 pairs with highest volume spike (5 minutes)
-/topgainers - Top 15 tokens with highest 24h price increase"""
+/topgainers - Top 15 tokens with highest 24h price increase
+/funding - Scan funding rates (top positive & negative)
+/topfunding - Top 10 highest and lowest funding rates"""
         
-        await update.message.reply_text(message, parse_mode='HTML')
+        await update.message.reply_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=self._build_menu_keyboard(),
+        )
+
+    def _build_menu_keyboard(self):
+        """Build a persistent reply-keyboard menu."""
+        if not ReplyKeyboardMarkup or not KeyboardButton:
+            return None
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(self._menu_labels["top10"])],
+                [KeyboardButton(self._menu_labels["topgainers"])],
+                [KeyboardButton(self._menu_labels["funding"])],
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=False,
+            input_field_placeholder="Chọn chức năng…",
+        )
+
+    async def _handle_menu_click(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle menu button clicks (text messages)."""
+        if not update or not update.message:
+            return
+
+        text = (update.message.text or "").strip()
+        if text == self._menu_labels["top10"]:
+            await self._handle_top10_command(update, context)
+            return
+        if text == self._menu_labels["topgainers"]:
+            await self._handle_topgainers_command(update, context)
+            return
+        if text == self._menu_labels["funding"]:
+            await self._handle_funding_command(update, context)
+            return
+
+        # Always keep menu visible; guide user back to buttons
+        await update.message.reply_text(
+            "Hãy chọn 1 chức năng trong menu bên dưới.",
+            reply_markup=self._build_menu_keyboard(),
+        )
     
     async def _handle_top10_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /top10 command - shows top 10 pairs with highest volume spike."""
@@ -214,139 +297,143 @@ I will send alerts when volume spikes are detected on Binance Futures.
             return
         
         if not self._volume_calculator or not self._baseline_calculator:
-            await update.message.reply_text("❌ Volume calculator or baseline calculator not initialized. Please try again later.")
+            await update.message.reply_text(
+                "❌ Volume calculator or baseline calculator not initialized. Please try again later.",
+                reply_markup=self._build_menu_keyboard(),
+            )
             return
         
         try:
-            current_time = datetime.now(timezone.utc)
-            current_timestamp = current_time.timestamp()
-            
-            # Get all symbols with trade data
-            symbols = await self._volume_calculator.get_all_symbols()
-            
-            if not symbols:
-                await update.message.reply_text("📊 No volume data available yet. Please wait a moment...")
-                return
-            
-            # Calculate spike ratio for each symbol
-            spike_data = []
-            fallback_volume_data = []  # Fallback if not enough baseline data
-            
-            for symbol in symbols:
-                try:
-                    # Get current volume
-                    current_volume = await self._volume_calculator.get_current_volume(symbol, current_timestamp)
-                    
-                    if current_volume == 0:
-                        continue
-                    
-                    # Get volume history for baseline
-                    history = await self._volume_calculator.get_volume_history(
-                        symbol,
-                        current_timestamp,
-                        minutes_back=Config.BASELINE_WINDOW_MINUTES
-                    )
-                    
-                    # Need at least 2 intervals (1 for baseline, 1 current)
-                    if len(history) < 2:
-                        # Fallback: use absolute volume
-                        fallback_volume_data.append({
-                            'symbol': symbol,
-                            'current_volume': current_volume,
-                            'baseline_volume': 0,
-                            'spike_ratio': 0
-                        })
-                        continue
-                    
-                    # Calculate baseline (exclude current interval)
-                    history_for_baseline = history[:-1] if history else []
-                    baseline_volume = self._baseline_calculator.calculate_baseline(
-                        history_for_baseline,
-                        method="median"
-                    )
-                    
-                    if baseline_volume <= 0:
-                        # Fallback: use absolute volume
-                        fallback_volume_data.append({
-                            'symbol': symbol,
-                            'current_volume': current_volume,
-                            'baseline_volume': 0,
-                            'spike_ratio': 0
-                        })
-                        continue
-                    
-                    # Calculate spike ratio
-                    spike_ratio = current_volume / baseline_volume
-                    
-                    spike_data.append({
-                        'symbol': symbol,
-                        'current_volume': current_volume,
-                        'baseline_volume': baseline_volume,
-                        'spike_ratio': spike_ratio
-                    })
-                except Exception as e:
-                    logger.debug(f"Error calculating spike for {symbol}: {e}")
-                    continue
-            
-            # If no spike data, use fallback (absolute volume)
-            if not spike_data:
-                if fallback_volume_data:
-                    # Sort by absolute volume
-                    fallback_volume_data.sort(key=lambda x: x['current_volume'], reverse=True)
-                    top_spikes = fallback_volume_data[:10]
-                    
-                    message = "📊 <b>TOP 10 PAIRS - HIGHEST VOLUME (5 minutes)</b>\n"
-                    message += "<i>⚠️ Not enough data for spike calculation, showing absolute volume</i>\n\n"
-                    
-                    for i, data in enumerate(top_spikes, 1):
-                        symbol = data['symbol']
-                        current_vol = data['current_volume']
-                        vol_str = self._format_volume(current_vol)
-                        binance_link = f"https://www.binance.com/en/futures/{symbol}"
-                        
-                        message += f"{i}. <a href=\"{binance_link}\"><b>{symbol}</b></a>\n"
-                        message += f"   📊 Vol: {vol_str} USDT\n\n"
-                    
-                    message += f"<i>Time: {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
-                    await update.message.reply_text(message, parse_mode='HTML')
-                    return
-                else:
-                    await update.message.reply_text(
-                        "📊 No volume data available yet. Please wait a few minutes for data to accumulate..."
-                    )
-                    return
-            
-            # Sort by spike ratio (descending)
-            spike_data.sort(key=lambda x: x['spike_ratio'], reverse=True)
-            
-            # Get top 10
-            top_spikes = spike_data[:10]
-            
-            # Format message
-            message = "📊 <b>TOP 10 PAIRS - HIGHEST VOLUME SPIKE (5 minutes)</b>\n\n"
-            
-            for i, data in enumerate(top_spikes, 1):
-                symbol = data['symbol']
-                current_vol = data['current_volume']
-                baseline_vol = data['baseline_volume']
-                spike_ratio = data['spike_ratio']
-                
-                vol_str = self._format_volume(current_vol)
-                baseline_str = self._format_volume(baseline_vol)
-                
-                # Binance Futures link
-                binance_link = f"https://www.binance.com/en/futures/{symbol}"
-                
-                message += f"{i}. <a href=\"{binance_link}\"><b>{symbol}</b></a>\n"
-                message += f"   📊 Vol: {vol_str} | Baseline: {baseline_str} | 🔥 {spike_ratio:.2f}x\n\n"
-            
-            message += f"<i>Time: {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
-            
-            await update.message.reply_text(message, parse_mode='HTML')
+            message = await self._build_top10_message()
+            await update.message.reply_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=self._build_menu_keyboard(),
+            )
             
         except Exception as e:
             logger.error(f"Error handling top10 command: {e}")
-            await update.message.reply_text(f"❌ Error: {str(e)}")
+            await update.message.reply_text(
+                f"❌ Error: {str(e)}",
+                reply_markup=self._build_menu_keyboard(),
+            )
+
+    async def _build_top10_message(self) -> str:
+        """Build the Top10 message (shared by command + auto job)."""
+        current_time = datetime.now(timezone.utc)
+        current_timestamp = current_time.timestamp()
+
+        # Get all symbols with trade data
+        symbols = await self._volume_calculator.get_all_symbols()
+        if not symbols:
+            return "📊 <b>TOP 10</b>\n\nNo volume data available yet. Please wait a moment..."
+
+        spike_data = []
+        fallback_volume_data = []
+
+        for symbol in symbols:
+            try:
+                current_volume = await self._volume_calculator.get_current_volume(symbol, current_timestamp)
+                if current_volume == 0:
+                    continue
+
+                history = await self._volume_calculator.get_volume_history(
+                    symbol,
+                    current_timestamp,
+                    minutes_back=Config.BASELINE_WINDOW_MINUTES,
+                )
+
+                # Need at least 2 intervals (1 baseline, 1 current)
+                if len(history) < 2:
+                    fallback_volume_data.append(
+                        {
+                            "symbol": symbol,
+                            "current_volume": current_volume,
+                        }
+                    )
+                    continue
+
+                history_for_baseline = history[:-1] if history else []
+                baseline_volume = self._baseline_calculator.calculate_baseline(history_for_baseline, method="median")
+                if baseline_volume <= 0:
+                    fallback_volume_data.append(
+                        {
+                            "symbol": symbol,
+                            "current_volume": current_volume,
+                        }
+                    )
+                    continue
+
+                spike_ratio = current_volume / baseline_volume
+                spike_data.append(
+                    {
+                        "symbol": symbol,
+                        "current_volume": current_volume,
+                        "baseline_volume": baseline_volume,
+                        "spike_ratio": spike_ratio,
+                    }
+                )
+            except Exception as e:
+                logger.debug(f"Error calculating spike for {symbol}: {e}")
+                continue
+
+        if not spike_data:
+            if not fallback_volume_data:
+                return "📊 <b>TOP 10</b>\n\nNo volume data available yet. Please wait a few minutes..."
+
+            fallback_volume_data.sort(key=lambda x: x["current_volume"], reverse=True)
+            top_items = fallback_volume_data[:10]
+            message = "📊 <b>TOP 10 PAIRS - HIGHEST VOLUME (5 minutes)</b>\n"
+            message += "<i>⚠️ Not enough data for spike calculation, showing absolute volume</i>\n\n"
+            for i, data in enumerate(top_items, 1):
+                symbol = data["symbol"]
+                current_vol = data["current_volume"]
+                vol_str = self._format_volume(current_vol)
+                binance_link = f"https://www.binance.com/en/futures/{symbol}"
+                message += f'{i}. <a href="{binance_link}"><b>{symbol}</b></a>\n'
+                message += f"   📊 Vol: {vol_str} USDT\n\n"
+            message += f"<i>Time: {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
+            return message
+
+        spike_data.sort(key=lambda x: x["spike_ratio"], reverse=True)
+        top_spikes = spike_data[:10]
+
+        message = "📊 <b>TOP 10 PAIRS - HIGHEST VOLUME SPIKE (5 minutes)</b>\n\n"
+        for i, data in enumerate(top_spikes, 1):
+            symbol = data["symbol"]
+            current_vol = data["current_volume"]
+            baseline_vol = data["baseline_volume"]
+            spike_ratio = data["spike_ratio"]
+            vol_str = self._format_volume(current_vol)
+            baseline_str = self._format_volume(baseline_vol)
+            binance_link = f"https://www.binance.com/en/futures/{symbol}"
+            message += f'{i}. <a href="{binance_link}"><b>{symbol}</b></a>\n'
+            message += f"   📊 Vol: {vol_str} | Baseline: {baseline_str} | 🔥 {spike_ratio:.2f}x\n\n"
+
+        message += f"<i>Time: {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
+        return message
+
+    async def _job_send_top10_summary(self, context):
+        """Periodic job: push Top10 summary to configured chats."""
+        if not self._initialized or not self.bot:
+            return
+        if not self.chat_ids:
+            return
+        if not self._volume_calculator or not self._baseline_calculator:
+            return
+        try:
+            message = await self._build_top10_message()
+            for cid in self.chat_ids:
+                await self.bot.send_message(
+                    chat_id=cid,
+                    text=message,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_markup=self._build_menu_keyboard(),
+                )
+                await asyncio.sleep(self.rate_limit_delay)
+        except Exception as e:
+            logger.warning(f"Auto Top10 summary job failed: {e}")
     
     async def _handle_topgainers_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /topgainers command."""
@@ -356,16 +443,25 @@ I will send alerts when volume spikes are detected on Binance Futures.
             return
         
         if not self._binance_client:
-            await update.message.reply_text("❌ Binance client not initialized. Please try again later.")
+            await update.message.reply_text(
+                "❌ Binance client not initialized. Please try again later.",
+                reply_markup=self._build_menu_keyboard(),
+            )
             return
         
         try:
             # Get 24h tickers
-            await update.message.reply_text("⏳ Fetching 24h data...")
+            await update.message.reply_text(
+                "⏳ Fetching 24h data...",
+                reply_markup=self._build_menu_keyboard(),
+            )
             tickers = await self._binance_client.get_24h_tickers()
             
             if not tickers:
-                await update.message.reply_text("📊 No ticker data available. Please try again later.")
+                await update.message.reply_text(
+                    "📊 No ticker data available. Please try again later.",
+                    reply_markup=self._build_menu_keyboard(),
+                )
                 return
             
             # Filter only positive price changes and sort by priceChangePercent descending
@@ -379,7 +475,10 @@ I will send alerts when volume spikes are detected on Binance Futures.
             top_gainers = gainers[:15]
             
             if not top_gainers:
-                await update.message.reply_text("📊 No gainers found in the last 24h.")
+                await update.message.reply_text(
+                    "📊 No gainers found in the last 24h.",
+                    reply_markup=self._build_menu_keyboard(),
+                )
                 return
             
             # Format message
@@ -410,11 +509,149 @@ I will send alerts when volume spikes are detected on Binance Futures.
             
             message += f"<i>Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
             
-            await update.message.reply_text(message, parse_mode='HTML')
+            await update.message.reply_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=self._build_menu_keyboard(),
+            )
             
         except Exception as e:
             logger.error(f"Error handling topgainers command: {e}")
-            await update.message.reply_text(f"❌ Error: {str(e)}")
+            await update.message.reply_text(
+                f"❌ Error: {str(e)}",
+                reply_markup=self._build_menu_keyboard(),
+            )
+    
+    async def _handle_funding_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /funding command - scan funding rates."""
+        logger.info(f"📥 Received /funding command")
+        if not update or not update.message:
+            logger.warning("Update or message is None")
+            return
+        
+        if not self._funding_scanner:
+            await update.message.reply_text(
+                "❌ Funding scanner not enabled or not initialized. Please check configuration.",
+                reply_markup=self._build_menu_keyboard(),
+            )
+            return
+        
+        try:
+            await update.message.reply_text(
+                "⏳ Scanning funding rates...",
+                reply_markup=self._build_menu_keyboard(),
+            )
+            
+            # Get symbols from binance client if available
+            symbols = None
+            if self._binance_client and hasattr(self._binance_client, 'symbols'):
+                symbols = self._binance_client.symbols
+            
+            # Get top positive and negative funding rates
+            top_positive = await self._funding_scanner.get_top_funding_rates(
+                top_n=10, highest=True, symbols=symbols
+            )
+            top_negative = await self._funding_scanner.get_top_funding_rates(
+                top_n=10, highest=False, symbols=symbols
+            )
+            
+            # Convert to dict format for formatter
+            from src.alert.formatter import AlertFormatter
+            top_positive_dicts = [item.to_dict() for item in top_positive]
+            top_negative_dicts = [item.to_dict() for item in top_negative]
+            
+            # Format message
+            message = AlertFormatter.format_funding_scan_summary(
+                top_positive_dicts, top_negative_dicts, "telegram"
+            )
+            
+            await update.message.reply_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=self._build_menu_keyboard(),
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling funding command: {e}")
+            await update.message.reply_text(
+                f"❌ Error: {str(e)}",
+                reply_markup=self._build_menu_keyboard(),
+            )
+    
+    async def _handle_topfunding_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /topfunding command - top funding rates."""
+        logger.info(f"📥 Received /topfunding command")
+        if not update or not update.message:
+            logger.warning("Update or message is None")
+            return
+        
+        if not self._funding_scanner:
+            await update.message.reply_text(
+                "❌ Funding scanner not enabled or not initialized. Please check configuration.",
+                reply_markup=self._build_menu_keyboard(),
+            )
+            return
+        
+        try:
+            await update.message.reply_text(
+                "⏳ Fetching top funding rates...",
+                reply_markup=self._build_menu_keyboard(),
+            )
+            
+            # Get symbols from binance client if available
+            symbols = None
+            if self._binance_client and hasattr(self._binance_client, 'symbols'):
+                symbols = self._binance_client.symbols
+            
+            # Get top 10 highest and lowest
+            top_highest = await self._funding_scanner.get_top_funding_rates(
+                top_n=10, highest=True, symbols=symbols
+            )
+            top_lowest = await self._funding_scanner.get_top_funding_rates(
+                top_n=10, highest=False, symbols=symbols
+            )
+            
+            current_time = datetime.now(timezone.utc)
+            message = "💰 <b>TOP FUNDING RATES</b> 💰\n\n"
+            
+            if top_highest:
+                message += "📈 <b>HIGHEST FUNDING RATES</b> (Longs pay shorts)\n"
+                for i, item in enumerate(top_highest, 1):
+                    symbol = item.symbol
+                    rate_pct = item.funding_rate_percent
+                    mark_price = item.mark_price
+                    binance_link = f"https://www.binance.com/en/futures/{symbol}"
+                    message += f"{i}. <a href=\"{binance_link}\"><b>{symbol}</b></a> "
+                    message += f"🔴 <b>+{rate_pct:.4f}%</b> "
+                    message += f"(${mark_price:,.4f})\n"
+                message += "\n"
+            
+            if top_lowest:
+                message += "📉 <b>LOWEST FUNDING RATES</b> (Shorts pay longs)\n"
+                for i, item in enumerate(top_lowest, 1):
+                    symbol = item.symbol
+                    rate_pct = item.funding_rate_percent
+                    mark_price = item.mark_price
+                    binance_link = f"https://www.binance.com/en/futures/{symbol}"
+                    message += f"{i}. <a href=\"{binance_link}\"><b>{symbol}</b></a> "
+                    message += f"🟢 <b>{rate_pct:.4f}%</b> "
+                    message += f"(${mark_price:,.4f})\n"
+                message += "\n"
+            
+            message += f"<i>Time: {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
+            
+            await update.message.reply_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=self._build_menu_keyboard(),
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling topfunding command: {e}")
+            await update.message.reply_text(
+                f"❌ Error: {str(e)}",
+                reply_markup=self._build_menu_keyboard(),
+            )
     
     def _format_volume(self, volume: float) -> str:
         """Format volume with appropriate units."""

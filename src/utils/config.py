@@ -44,6 +44,20 @@ class Config:
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
     TELEGRAM_CHAT_ID: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")  # Optional: specific chat ID, if None will auto-detect from recent messages
+    # Optional: auto push scan summary to Telegram (0 disables)
+    TELEGRAM_AUTO_TOP10_INTERVAL_MINUTES: int = int(os.getenv("TELEGRAM_AUTO_TOP10_INTERVAL_MINUTES", "0"))
+    
+    # Funding Scanner
+    ENABLE_FUNDING_SCANNER: bool = os.getenv("ENABLE_FUNDING_SCANNER", "true").lower() == "true"
+    FUNDING_SCAN_INTERVAL_SECONDS: int = int(os.getenv("FUNDING_SCAN_INTERVAL_SECONDS", "300"))  # 5 minutes default
+    # Funding rate thresholds (as decimals, e.g., 0.001 = 0.1%)
+    HIGH_FUNDING_RATE_THRESHOLD: float = float(os.getenv("HIGH_FUNDING_RATE_THRESHOLD", "0.001"))  # 0.1% (longs pay shorts)
+    LOW_FUNDING_RATE_THRESHOLD: float = float(os.getenv("LOW_FUNDING_RATE_THRESHOLD", "-0.001"))  # -0.1% (shorts pay longs)
+    FUNDING_RATE_CHANGE_THRESHOLD: float = float(os.getenv("FUNDING_RATE_CHANGE_THRESHOLD", "0.0005"))  # 0.05% change from average
+    FUNDING_ALERT_COOLDOWN_MINUTES: int = int(os.getenv("FUNDING_ALERT_COOLDOWN_MINUTES", "60"))  # 1 hour cooldown
+    # Filter thresholds for scanning (optional, None = no filter)
+    MIN_FUNDING_RATE_THRESHOLD: Optional[float] = None  # For filtering scan results
+    MAX_FUNDING_RATE_THRESHOLD: Optional[float] = None  # For filtering scan results
     
     @classmethod
     def validate(cls) -> bool:
@@ -73,6 +87,16 @@ class Config:
         if cls.MAX_SYMBOLS <= 0:
             logger.error("MAX_SYMBOLS must be > 0")
             return False
+        
+        # Validate funding scanner parameters
+        if cls.ENABLE_FUNDING_SCANNER:
+            if cls.FUNDING_SCAN_INTERVAL_SECONDS <= 0:
+                logger.error("FUNDING_SCAN_INTERVAL_SECONDS must be > 0")
+                return False
+            
+            if cls.FUNDING_ALERT_COOLDOWN_MINUTES < 0:
+                logger.error("FUNDING_ALERT_COOLDOWN_MINUTES must be >= 0")
+                return False
         
         # API keys are optional for public data (volume)
         return True

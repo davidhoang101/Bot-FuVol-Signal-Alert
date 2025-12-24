@@ -2,12 +2,13 @@
 import asyncio
 import signal
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Optional
 
 from src.utils.config import Config
 from src.utils.logger import setup_logger
 from src.data.binance_client import BinanceFuturesClient
 from src.data.volume_calculator import VolumeCalculator
+from src.data.funding_scanner import FundingScanner
 from src.detector.baseline import BaselineCalculator
 from src.detector.spike_detector import SpikeDetector
 from src.alert.formatter import AlertFormatter
@@ -27,11 +28,18 @@ class VolumeAlertSystem:
         self.alert_formatter = AlertFormatter()
         self.telegram_bot = TelegramAlertBot()
         
+        # Funding scanner (optional)
+        self.funding_scanner: Optional[FundingScanner] = None
+        if Config.ENABLE_FUNDING_SCANNER:
+            # Will be initialized with shared client after binance_client is ready
+            self.funding_scanner = FundingScanner(binance_client=None)
+        
         self.running = False
         self.stats = {
             'trades_processed': 0,
             'alerts_triggered': 0,
-            'symbols_monitored': 0
+            'symbols_monitored': 0,
+            'funding_alerts_triggered': 0
         }
         # Thread-safe counter for stats
         self._stats_lock = asyncio.Lock()
@@ -52,11 +60,22 @@ class VolumeAlertSystem:
         self.telegram_bot.set_volume_calculator(self.volume_calculator)
         self.telegram_bot.set_binance_client(self.binance_client)
         self.telegram_bot.set_baseline_calculator(self.baseline_calculator)
+        if self.funding_scanner:
+            self.telegram_bot.set_funding_scanner(self.funding_scanner)
         telegram_enabled = await self.telegram_bot.initialize()
         if telegram_enabled:
             logger.info("Telegram alerts enabled")
         else:
             logger.info("Telegram alerts disabled (using console only)")
+        
+        # Initialize funding scanner (share binance client if possible)
+        if self.funding_scanner:
+            # Try to use the same client instance if available
+            if hasattr(self.binance_client, 'client') and self.binance_client.client:
+                self.funding_scanner.client = self.binance_client.client
+                self.funding_scanner._own_client = False
+            await self.funding_scanner.initialize()
+            logger.info("Funding scanner initialized")
         
         logger.info(f"System initialized. Monitoring {self.stats['symbols_monitored']} symbols")
         logger.info(f"Detection parameters:")
@@ -64,6 +83,14 @@ class VolumeAlertSystem:
         logger.info(f"  - Spike ratio threshold: {Config.SPIKE_RATIO_THRESHOLD}x")
         logger.info(f"  - Baseline window: {Config.BASELINE_WINDOW_MINUTES} minutes")
         logger.info(f"  - Cooldown period: {Config.COOLDOWN_PERIOD_MINUTES} minutes")
+        
+        if self.funding_scanner:
+            logger.info(f"Funding scanner parameters:")
+            logger.info(f"  - Scan interval: {Config.FUNDING_SCAN_INTERVAL_SECONDS} seconds")
+            logger.info(f"  - High threshold: {Config.HIGH_FUNDING_RATE_THRESHOLD * 100:.4f}%")
+            logger.info(f"  - Low threshold: {Config.LOW_FUNDING_RATE_THRESHOLD * 100:.4f}%")
+            logger.info(f"  - Change threshold: {Config.FUNDING_RATE_CHANGE_THRESHOLD * 100:.4f}%")
+            logger.info(f"  - Alert cooldown: {Config.FUNDING_ALERT_COOLDOWN_MINUTES} minutes")
     
     async def trade_handler(self, symbol: str, price: float, quantity: float, timestamp: float):
         """Handle incoming trade data."""
@@ -180,6 +207,36 @@ class VolumeAlertSystem:
         tasks = [check_symbol_spike(symbol) for symbol in symbols]
         await asyncio.gather(*tasks, return_exceptions=True)
     
+    async def check_funding_alerts(self):
+        """Check for funding rate alerts."""
+        if not self.funding_scanner:
+            return
+        
+        try:
+            alerts = await self.funding_scanner.check_funding_rate_alerts(
+                symbols=self.binance_client.symbols
+            )
+            
+            if alerts:
+                for alert_info in alerts:
+                    async with self._stats_lock:
+                        self.stats['funding_alerts_triggered'] += 1
+                    
+                    # Format alert messages
+                    console_message = self.alert_formatter.format_funding_alert(alert_info, "console")
+                    telegram_message = self.alert_formatter.format_funding_alert(alert_info, "telegram")
+                    
+                    # Console output
+                    logger.info("=" * 60)
+                    logger.info(console_message)
+                    logger.info("=" * 60)
+                    
+                    # Send Telegram alert
+                    await self.telegram_bot.send_alert(telegram_message)
+                    
+        except Exception as e:
+            logger.warning(f"Error checking funding alerts: {e}")
+    
     async def run(self):
         """Run the main monitoring loop."""
         self.running = True
@@ -188,6 +245,11 @@ class VolumeAlertSystem:
         websocket_task = asyncio.create_task(
             self.binance_client.start_websocket(self.trade_handler)
         )
+        
+        # Start funding scanner monitoring loop (if enabled)
+        funding_task = None
+        if self.funding_scanner:
+            funding_task = asyncio.create_task(self._run_funding_scanner())
         
         # Wait a bit for initial data
         await asyncio.sleep(10)
@@ -208,13 +270,34 @@ class VolumeAlertSystem:
         finally:
             self.running = False
             await self.binance_client.close()
+            if self.funding_scanner:
+                await self.funding_scanner.close()
             await self.telegram_bot.close()
             websocket_task.cancel()
+            if funding_task:
+                funding_task.cancel()
             
             logger.info("System shutdown complete")
             async with self._stats_lock:
                 final_stats = self.stats.copy()
             logger.info(f"Final stats: {final_stats}")
+    
+    async def _run_funding_scanner(self):
+        """Run funding scanner monitoring loop."""
+        logger.info("Starting funding scanner monitoring loop...")
+        
+        try:
+            while self.running:
+                # Check for funding alerts
+                await self.check_funding_alerts()
+                
+                # Wait for next scan interval
+                await asyncio.sleep(Config.FUNDING_SCAN_INTERVAL_SECONDS)
+                
+        except asyncio.CancelledError:
+            logger.info("Funding scanner monitoring stopped")
+        except Exception as e:
+            logger.error(f"Error in funding scanner loop: {e}")
 
 
 async def main():

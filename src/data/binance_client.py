@@ -61,6 +61,12 @@ class BinanceFuturesClient:
         self.reconnect_attempts = 0
         self._running = False
         
+        # Blacklist for symbols that consistently fail to connect
+        # These symbols will be skipped when loading
+        self.symbol_blacklist = {
+            'LABUSDT',  # Known problematic symbol
+        }
+        
         # Set up exception handler to prevent "Future exception was never retrieved" warnings
         # This will catch any unhandled exceptions in tasks
         def exception_handler(loop, context):
@@ -167,7 +173,12 @@ class BinanceFuturesClient:
                 if (status == 'TRADING' and 
                     quote_asset == 'USDT' and
                     contract_type == 'PERPETUAL'):
-                    symbols.append(symbol_info['symbol'])
+                    symbol = symbol_info['symbol']
+                    # Skip blacklisted symbols
+                    if symbol not in self.symbol_blacklist:
+                        symbols.append(symbol)
+                    else:
+                        logger.debug(f"Skipping blacklisted symbol: {symbol}")
             
             logger.info(f"Found {len(symbols)} active USDT perpetual contracts")
             
@@ -216,6 +227,23 @@ class BinanceFuturesClient:
                 # Sort by volume and take top N
                 filtered.sort(key=lambda s: volume_map.get(s, 0), reverse=True)
                 self.symbols = filtered[:Config.MAX_SYMBOLS]
+                
+                # Additional validation: check if symbols have valid trade streams
+                # Some symbols might be listed but not have active trade streams
+                valid_symbols = []
+                invalid_symbols = []
+                
+                # Check a sample of symbols to see if they have trade data
+                # We'll validate all symbols but this helps catch obvious issues
+                for symbol in self.symbols:
+                    # For now, we'll trust the exchange_info status
+                    # If a symbol is TRADING, it should have a trade stream
+                    # We'll let the WebSocket connection handle validation
+                    valid_symbols.append(symbol)
+                
+                if invalid_symbols:
+                    logger.warning(f"Found {len(invalid_symbols)} potentially invalid symbols: {', '.join(invalid_symbols[:5])}")
+                    self.symbols = valid_symbols
                 
                 # Log some sample symbols for debugging
                 if self.symbols:
@@ -421,6 +449,10 @@ class BinanceFuturesClient:
                 """Connect to a single stream with manual keepalive ping."""
                 reconnect_count = 0
                 backup_ping_handle = None
+                last_log_time = 0
+                log_interval = 60  # Only log every 60 seconds to reduce spam
+                consecutive_failures = 0
+                max_consecutive_failures = 5  # Stop after 5 consecutive failures
                 
                 try:
                     while self._running:
@@ -437,6 +469,8 @@ class BinanceFuturesClient:
                             ) as websocket:
                                 logger.info(f"✅ Connected to {stream_name}")
                                 reconnect_count = 0  # Reset on successful connection
+                                consecutive_failures = 0  # Reset consecutive failures
+                                last_log_time = 0  # Reset log timer
                                 
                                 # Additional manual ping as backup (every 18 seconds)
                                 async def backup_ping_task():
@@ -483,29 +517,69 @@ class BinanceFuturesClient:
                             if not self._running:
                                 break
                             reconnect_count += 1
+                            consecutive_failures += 1
+                            current_time = time.time()
+                            
                             # Suppress ping timeout - it's normal and will reconnect
                             error_msg = str(e).lower()
                             if "ping timeout" not in error_msg:
-                                if reconnect_count <= 3:
-                                    logger.warning(f"Stream {stream_name} connection closed: {e}, reconnecting... (attempt {reconnect_count})")
+                                # Only log every N seconds to reduce spam, or for first few attempts
+                                should_log = (current_time - last_log_time) >= log_interval or reconnect_count <= 2
+                                
+                                if should_log:
+                                    if reconnect_count <= 2:
+                                        logger.warning(f"Stream {stream_name} connection closed, reconnecting... (attempt {reconnect_count})")
+                                    elif reconnect_count < Config.MAX_RECONNECT_ATTEMPTS:
+                                        # Only log at debug level after first few attempts
+                                        logger.debug(f"Stream {stream_name} reconnecting... (attempt {reconnect_count}/{Config.MAX_RECONNECT_ATTEMPTS})")
+                                    last_log_time = current_time
+                                
+                                # Stop after consecutive failures (faster than max attempts)
+                                if consecutive_failures >= max_consecutive_failures:
+                                    logger.error(f"Stream {stream_name} failed {consecutive_failures} times consecutively. Symbol may not exist or be inactive. Stopping.")
+                                    break
+                                
                                 # Limit reconnection attempts to prevent infinite loops
                                 if reconnect_count >= Config.MAX_RECONNECT_ATTEMPTS:
-                                    logger.error(f"Stream {stream_name} exceeded max reconnection attempts ({Config.MAX_RECONNECT_ATTEMPTS}), stopping")
+                                    logger.error(f"Stream {stream_name} exceeded max reconnection attempts ({Config.MAX_RECONNECT_ATTEMPTS}). Stopping.")
                                     break
+                            else:
+                                # Ping timeout - reset consecutive failures counter
+                                consecutive_failures = 0
                             await asyncio.sleep(Config.WEBSOCKET_RECONNECT_DELAY)
                         except Exception as e:
                             if not self._running:
                                 break
                             reconnect_count += 1
+                            consecutive_failures += 1
+                            current_time = time.time()
+                            
                             # Suppress ping timeout errors
                             error_str = str(e).lower()
                             if "ping timeout" not in error_str:
-                                if reconnect_count <= 3:
-                                    logger.warning(f"Stream {stream_name} error: {e}, reconnecting... (attempt {reconnect_count})")
+                                # Only log every N seconds to reduce spam, or for first few attempts
+                                should_log = (current_time - last_log_time) >= log_interval or reconnect_count <= 2
+                                
+                                if should_log:
+                                    if reconnect_count <= 2:
+                                        logger.warning(f"Stream {stream_name} error, reconnecting... (attempt {reconnect_count})")
+                                    elif reconnect_count < Config.MAX_RECONNECT_ATTEMPTS:
+                                        # Only log at debug level after first few attempts
+                                        logger.debug(f"Stream {stream_name} reconnecting... (attempt {reconnect_count}/{Config.MAX_RECONNECT_ATTEMPTS})")
+                                    last_log_time = current_time
+                                
+                                # Stop after consecutive failures (faster than max attempts)
+                                if consecutive_failures >= max_consecutive_failures:
+                                    logger.error(f"Stream {stream_name} failed {consecutive_failures} times consecutively. Symbol may not exist or be inactive. Stopping.")
+                                    break
+                                
                                 # Limit reconnection attempts
                                 if reconnect_count >= Config.MAX_RECONNECT_ATTEMPTS:
-                                    logger.error(f"Stream {stream_name} exceeded max reconnection attempts ({Config.MAX_RECONNECT_ATTEMPTS}), stopping")
+                                    logger.error(f"Stream {stream_name} exceeded max reconnection attempts ({Config.MAX_RECONNECT_ATTEMPTS}). Stopping.")
                                     break
+                            else:
+                                # Ping timeout - reset consecutive failures counter
+                                consecutive_failures = 0
                             await asyncio.sleep(Config.WEBSOCKET_RECONNECT_DELAY)
                 except asyncio.CancelledError:
                     # Task was cancelled, clean up
