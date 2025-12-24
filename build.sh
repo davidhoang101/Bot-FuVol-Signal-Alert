@@ -1,9 +1,13 @@
 #!/bin/bash
 # Build script for Railway deployment
+# Railway will auto-detect Node.js from package.json
 
 set -e  # Exit on error
 
 echo "=== Building frontend ==="
+echo "Node version: $(node --version)"
+echo "NPM version: $(npm --version)"
+
 cd frontend
 
 echo "Installing dependencies..."
@@ -16,7 +20,7 @@ echo "Checking build output..."
 if [ -d "dist" ]; then
     echo "✅ Frontend build successful!"
     echo "Files in dist/:"
-    ls -la dist/
+    ls -la dist/ | head -10
     if [ -f "dist/index.html" ]; then
         echo "✅ index.html found"
     else

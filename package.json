@@ -1,0 +1,14 @@
+{
+  "name": "binance-trading-console",
+  "version": "1.0.0",
+  "description": "Binance Trading Console - Full stack app",
+  "scripts": {
+    "build:frontend": "cd frontend && npm install && npm run build",
+    "build:backend": "pip install -r backend/requirements.txt",
+    "build": "npm run build:frontend && npm run build:backend"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
