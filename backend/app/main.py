@@ -47,8 +47,39 @@ app.include_router(emergency.router, prefix="/api/emergency", tags=["emergency"]
 app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
 
 # Serve static files from frontend build (for production)
-# This will be set up after logging is initialized
+# Calculate path: backend/app/main.py -> backend -> root -> frontend/dist
 frontend_dist = Path(__file__).parent.parent.parent.parent / "frontend" / "dist"
+
+# Serve frontend static files (define route at module level)
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    """Serve frontend app for all non-API routes."""
+    # Don't interfere with API routes
+    if full_path.startswith("api/"):
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    
+    # Check if frontend is built
+    if not frontend_dist.exists() or not (frontend_dist / "index.html").exists():
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Frontend not built",
+                "message": "Please build frontend first: cd frontend && npm run build",
+                "path": str(frontend_dist)
+            }
+        )
+    
+    # Serve static files if they exist
+    requested_file = frontend_dist / full_path
+    if full_path and requested_file.exists() and requested_file.is_file():
+        return FileResponse(str(requested_file))
+    
+    # For SPA routing, serve index.html
+    index_path = frontend_dist / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    
+    return JSONResponse(status_code=404, content={"error": "Frontend file not found"})
 
 
 @app.on_event("startup")
@@ -58,29 +89,26 @@ async def startup_event():
     logger.info("Starting up application...")
     
     # Setup frontend static files serving
+    logger.info(f"Checking for frontend at: {frontend_dist}")
+    logger.info(f"Frontend dist exists: {frontend_dist.exists()}")
+    
     if frontend_dist.exists() and (frontend_dist / "index.html").exists():
-        logger.info(f"Serving frontend from {frontend_dist}")
+        logger.info(f"✅ Serving frontend from {frontend_dist}")
         
         # Mount static assets
         static_dir = frontend_dist / "assets"
         if static_dir.exists():
+            logger.info(f"Mounting static assets from {static_dir}")
             app.mount("/assets", StaticFiles(directory=str(static_dir)), name="assets")
+        else:
+            logger.warning(f"Static assets directory not found: {static_dir}")
         
-        # Serve index.html for all non-API routes
-        @app.get("/{full_path:path}")
-        async def serve_frontend(full_path: str):
-            """Serve frontend app for all non-API routes."""
-            # Don't interfere with API routes
-            if full_path.startswith("api/"):
-                return JSONResponse(status_code=404, content={"error": "Not found"})
-            
-            # Serve index.html for SPA routing
-            index_path = frontend_dist / "index.html"
-            if index_path.exists():
-                return FileResponse(str(index_path))
-            return JSONResponse(status_code=404, content={"error": "Frontend not built"})
+        # Serve index.html for all non-API routes (must be defined at module level, not in startup)
+        # We'll handle this with a catch-all route
     else:
-        logger.warning(f"Frontend dist not found at {frontend_dist}, serving API only")
+        logger.warning(f"⚠️ Frontend dist not found at {frontend_dist}, serving API only")
+        logger.info(f"Current working directory: {os.getcwd()}")
+        logger.info(f"Files in frontend directory: {list((frontend_dist.parent).iterdir()) if frontend_dist.parent.exists() else 'N/A'}")
     
     # Initialize database
     try:
