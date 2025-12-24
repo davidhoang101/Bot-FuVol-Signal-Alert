@@ -25,6 +25,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    bash \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy backend requirements
@@ -44,12 +45,16 @@ COPY main.py ./
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
+# Copy startup script
+COPY backend/start.sh ./backend/start.sh
+RUN chmod +x ./backend/start.sh
+
 # Set working directory to backend for running
 WORKDIR /app/backend
 
 # Expose port (Railway will set PORT env var)
 EXPOSE 8000
 
-# Start command - use PORT env var if set, otherwise default to 8000
-CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+# Start command - use startup script for better logging
+CMD ["/app/backend/start.sh"]
 

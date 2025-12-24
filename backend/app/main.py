@@ -47,8 +47,23 @@ app.include_router(emergency.router, prefix="/api/emergency", tags=["emergency"]
 app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
 
 # Serve static files from frontend build (for production)
-# Calculate path: backend/app/main.py -> backend -> root -> frontend/dist
-frontend_dist = Path(__file__).parent.parent.parent.parent / "frontend" / "dist"
+# Try multiple paths to support both local dev and Docker deployment
+# Local: backend/app/main.py -> backend -> root -> frontend/dist
+# Docker: /app/backend/app/main.py -> /app/backend -> /app -> frontend/dist
+# Or: /app/frontend/dist (absolute path in Docker)
+possible_paths = [
+    Path(__file__).parent.parent.parent.parent / "frontend" / "dist",  # Local dev
+    Path("/app/frontend/dist"),  # Docker absolute path
+    Path(__file__).parent.parent.parent / "frontend" / "dist",  # Alternative Docker path
+]
+frontend_dist = None
+for path in possible_paths:
+    if path.exists() and (path / "index.html").exists():
+        frontend_dist = path
+        break
+if frontend_dist is None:
+    # Fallback to first path if none found (will show error in startup)
+    frontend_dist = possible_paths[0]
 
 # Mount static assets if they exist (must be before catch-all route)
 static_dir = frontend_dist / "assets"
