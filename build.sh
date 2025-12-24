@@ -39,14 +39,19 @@ echo "=== Frontend build complete ==="
 
 echo ""
 echo "=== Installing backend dependencies ==="
-# Use pip3 if available, fallback to pip
+# Use pip3 if available, fallback to pip, or python -m pip
 if command -v pip3 &> /dev/null; then
     pip3 install -r backend/requirements.txt
 elif command -v pip &> /dev/null; then
     pip install -r backend/requirements.txt
+elif command -v python3 &> /dev/null; then
+    python3 -m pip install -r backend/requirements.txt
+elif command -v python &> /dev/null; then
+    python -m pip install -r backend/requirements.txt
 else
-    echo "❌ Neither pip3 nor pip found!"
-    exit 1
+    echo "❌ No Python/pip found! Trying to install anyway..."
+    # Try anyway - Railway might have it in PATH
+    pip install -r backend/requirements.txt || pip3 install -r backend/requirements.txt || python3 -m pip install -r backend/requirements.txt
 fi
 
 echo "=== Build complete ==="
