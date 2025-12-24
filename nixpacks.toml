@@ -2,13 +2,13 @@
 # This ensures both Node.js and Python are available
 
 [phases.setup]
-nixPkgs = ["nodejs_20", "python311"]
+nixPkgs = ["nodejs_20", "python311", "pip"]
 
 [phases.install]
 cmds = [
   "npm install",
   "cd frontend && npm install",
-  "pip install -r backend/requirements.txt"
+  "python3 -m pip install -r backend/requirements.txt"
 ]
 
 [phases.build]
