@@ -2,7 +2,7 @@
 # This ensures both Node.js and Python are available
 
 [phases.setup]
-nixPkgs = ["nodejs-18_x", "python311"]
+nixPkgs = ["nodejs_20", "python311"]
 
 [phases.install]
 cmds = [
