@@ -9,6 +9,7 @@ nixPkgs = ["nodejs_20", "python311"]
 cmds = [
   "npm install",
   "cd frontend && npm install",
+  "python3 -m ensurepip --upgrade",
   "python3 -m pip install -r backend/requirements.txt"
 ]
 
