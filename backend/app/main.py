@@ -47,30 +47,8 @@ app.include_router(emergency.router, prefix="/api/emergency", tags=["emergency"]
 app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
 
 # Serve static files from frontend build (for production)
+# This will be set up after logging is initialized
 frontend_dist = Path(__file__).parent.parent.parent.parent / "frontend" / "dist"
-if frontend_dist.exists() and (frontend_dist / "index.html").exists():
-    logger.info(f"Serving frontend from {frontend_dist}")
-    
-    # Mount static assets
-    static_dir = frontend_dist / "assets"
-    if static_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(static_dir)), name="assets")
-    
-    # Serve index.html for all non-API routes
-    @app.get("/{full_path:path}")
-    async def serve_frontend(full_path: str):
-        """Serve frontend app for all non-API routes."""
-        # Don't interfere with API routes
-        if full_path.startswith("api/"):
-            return JSONResponse(status_code=404, content={"error": "Not found"})
-        
-        # Serve index.html for SPA routing
-        index_path = frontend_dist / "index.html"
-        if index_path.exists():
-            return FileResponse(str(index_path))
-        return JSONResponse(status_code=404, content={"error": "Frontend not built"})
-else:
-    logger.warning(f"Frontend dist not found at {frontend_dist}, serving API only")
 
 
 @app.on_event("startup")
@@ -78,6 +56,33 @@ async def startup_event():
     """Initialize database on startup."""
     logger = logging.getLogger(__name__)
     logger.info("Starting up application...")
+    
+    # Setup frontend static files serving
+    if frontend_dist.exists() and (frontend_dist / "index.html").exists():
+        logger.info(f"Serving frontend from {frontend_dist}")
+        
+        # Mount static assets
+        static_dir = frontend_dist / "assets"
+        if static_dir.exists():
+            app.mount("/assets", StaticFiles(directory=str(static_dir)), name="assets")
+        
+        # Serve index.html for all non-API routes
+        @app.get("/{full_path:path}")
+        async def serve_frontend(full_path: str):
+            """Serve frontend app for all non-API routes."""
+            # Don't interfere with API routes
+            if full_path.startswith("api/"):
+                return JSONResponse(status_code=404, content={"error": "Not found"})
+            
+            # Serve index.html for SPA routing
+            index_path = frontend_dist / "index.html"
+            if index_path.exists():
+                return FileResponse(str(index_path))
+            return JSONResponse(status_code=404, content={"error": "Frontend not built"})
+    else:
+        logger.warning(f"Frontend dist not found at {frontend_dist}, serving API only")
+    
+    # Initialize database
     try:
         await init_db()
         logger.info("Database initialized successfully")
