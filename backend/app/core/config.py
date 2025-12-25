@@ -26,8 +26,12 @@ class Settings(BaseSettings):
     DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     
-    # CORS
-    CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:3000"]
+    # CORS - Allow all origins by default (can restrict via CORS_ORIGINS env var)
+    _cors_origins_env = os.getenv("CORS_ORIGINS", "")
+    CORS_ORIGINS: List[str] = (
+        _cors_origins_env.split(",") if _cors_origins_env 
+        else ["*"]  # Allow all in production
+    )
     
     # Binance API
     BINANCE_API_KEY: Optional[str] = os.getenv("BINANCE_API_KEY")

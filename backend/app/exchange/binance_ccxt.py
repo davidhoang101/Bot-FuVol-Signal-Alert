@@ -57,18 +57,29 @@ class BinanceExchangeAdapter:
                 'sandbox': settings.BINANCE_ENABLE_TESTNET,
             })
             
-            # Test connections
-            logger.info("Loading spot markets...")
-            await self.spot_client.load_markets()
-            logger.info("Loading futures markets...")
-            await self.futures_client.load_markets()
+            # Load markets (only if API key is provided, otherwise skip)
+            if api_key and api_secret:
+                logger.info("Loading spot markets...")
+                try:
+                    await self.spot_client.load_markets()
+                except Exception as e:
+                    logger.warning(f"Failed to load spot markets (will use public APIs): {e}")
+                
+                logger.info("Loading futures markets...")
+                try:
+                    await self.futures_client.load_markets()
+                except Exception as e:
+                    logger.warning(f"Failed to load futures markets (will use public APIs): {e}")
+            else:
+                logger.info("No API key provided - using public APIs only (no load_markets)")
             
             self._initialized = True
             logger.info("✅ Binance exchange adapter initialized")
             
         except Exception as e:
             logger.error(f"Failed to initialize Binance adapter: {e}", exc_info=True)
-            raise
+            # Don't raise - allow app to continue with public APIs
+            self._initialized = True  # Mark as initialized anyway
     
     async def close(self):
         """Close connections."""
@@ -94,25 +105,39 @@ class BinanceExchangeAdapter:
                 raise
     
     async def get_spot_price(self, symbol: str) -> float:
-        """Get current spot price."""
-        await self.initialize()
+        """Get current spot price using public API."""
         try:
-            ticker = await self._retry_with_backoff(
-                lambda: self.spot_client.fetch_ticker(symbol)
-            )
-            return float(ticker['last'])
+            # Use public API directly (no API key needed)
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+            
+            # Disable SSL verification for development
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return float(data.get('price', 0))
+                    else:
+                        raise Exception(f"Binance API returned status {response.status}")
         except Exception as e:
             logger.error(f"Error getting spot price for {symbol}: {e}")
             raise
     
     async def get_perp_price(self, symbol: str) -> float:
-        """Get current perpetual futures price."""
-        await self.initialize()
+        """Get current perpetual futures price using public API."""
         try:
-            ticker = await self._retry_with_backoff(
-                lambda: self.futures_client.fetch_ticker(symbol)
-            )
-            return float(ticker['last'])
+            # Use public API directly (no API key needed)
+            url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}"
+            
+            # Disable SSL verification for development
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return float(data.get('price', 0))
+                    else:
+                        raise Exception(f"Binance API returned status {response.status}")
         except Exception as e:
             logger.error(f"Error getting perp price for {symbol}: {e}")
             raise
@@ -126,7 +151,9 @@ class BinanceExchangeAdapter:
             # https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT
             url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
             
-            async with aiohttp.ClientSession() as session:
+            # Disable SSL verification for development
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -155,31 +182,38 @@ class BinanceExchangeAdapter:
             }
     
     async def get_orderbook(self, symbol: str, market_type: str = 'spot', limit: int = 20) -> Dict:
-        """Get orderbook snapshot."""
-        await self.initialize()
-        client = self.spot_client if market_type == 'spot' else self.futures_client
-        
+        """Get orderbook snapshot using public API."""
         try:
-            orderbook = await self._retry_with_backoff(
-                lambda: client.fetch_order_book(symbol, limit)
-            )
+            # Use public API directly
+            if market_type == 'spot':
+                url = f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit={limit}"
+            else:
+                url = f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol}&limit={limit}"
             
-            # Calculate spread
-            bids = orderbook.get('bids', [])
-            asks = orderbook.get('asks', [])
-            
-            spread_bps = None
-            if bids and asks:
-                best_bid = float(bids[0][0])
-                best_ask = float(asks[0][0])
-                mid_price = (best_bid + best_ask) / 2
-                spread_bps = ((best_ask - best_bid) / mid_price) * 10000
-            
-            return {
-                'bids': bids[:limit],
-                'asks': asks[:limit],
-                'spread_bps': spread_bps
-            }
+            # Disable SSL verification for development
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        bids = [[float(b[0]), float(b[1])] for b in data.get('bids', [])]
+                        asks = [[float(a[0]), float(a[1])] for a in data.get('asks', [])]
+                        
+                        # Calculate spread
+                        spread_bps = None
+                        if bids and asks:
+                            best_bid = bids[0][0]
+                            best_ask = asks[0][0]
+                            mid_price = (best_bid + best_ask) / 2
+                            spread_bps = ((best_ask - best_bid) / mid_price) * 10000
+                        
+                        return {
+                            'bids': bids[:limit],
+                            'asks': asks[:limit],
+                            'spread_bps': spread_bps
+                        }
+                    else:
+                        raise Exception(f"Binance API returned status {response.status}")
         except Exception as e:
             logger.error(f"Error getting orderbook for {symbol}: {e}")
             raise
@@ -403,15 +437,23 @@ class BinanceExchangeAdapter:
             raise
     
     async def get_24h_volume(self, symbol: str, market_type: str = 'spot') -> float:
-        """Get 24h volume for symbol."""
-        await self.initialize()
-        client = self.spot_client if market_type == 'spot' else self.futures_client
-        
+        """Get 24h volume for symbol using public API."""
         try:
-            ticker = await self._retry_with_backoff(
-                lambda: client.fetch_ticker(symbol)
-            )
-            return float(ticker.get('quoteVolume', 0))  # USDT volume
+            # Use public API directly
+            if market_type == 'spot':
+                url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+            else:
+                url = f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={symbol}"
+            
+            # Disable SSL verification for development
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return float(data.get('quoteVolume', 0))  # USDT volume
+                    else:
+                        return 0.0
         except Exception as e:
             logger.error(f"Error getting 24h volume for {symbol}: {e}")
             return 0.0

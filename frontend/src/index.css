@@ -9,9 +9,101 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background-color: #000000;
+  color: #00ff00;
 }
 
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
+}
+
+/* Animations for viral effect */
+@keyframes pulse-glow {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.02);
+  }
+}
+
+@keyframes bounce-in {
+  0% {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes slide-up {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes number-flash {
+  0%, 100% {
+    color: #00ff00;
+  }
+  50% {
+    color: #00ffff;
+  }
+}
+
+@keyframes volume-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 0.9;
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.animate-bounce-in {
+  animation: bounce-in 0.5s ease-out;
+}
+
+.animate-slide-up {
+  animation: slide-up 0.3s ease-out;
+}
+
+.animate-number-flash {
+  animation: number-flash 1.5s ease-in-out infinite;
+}
+
+.animate-volume-pulse {
+  animation: volume-pulse 2s ease-in-out infinite;
+}
+
+/* Glowing text effect - minimal or none */
+.text-glow {
+  /* No text-shadow for clarity */
+}
+
+.text-glow-strong {
+  /* No text-shadow for clarity */
+}
+
+/* Hover effects */
+.hover-glow:hover {
+  opacity: 0.9;
+  transition: all 0.3s ease;
 }

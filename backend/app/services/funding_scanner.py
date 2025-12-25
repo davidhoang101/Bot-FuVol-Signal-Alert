@@ -3,6 +3,7 @@ import asyncio
 import logging
 from typing import Dict, List, Optional
 from datetime import datetime
+import aiohttp
 
 from app.exchange.binance_ccxt import BinanceExchangeAdapter
 from app.core.config import settings
@@ -44,22 +45,29 @@ class FundingScannerService:
             max_spread_bps = settings.FUNDING_SCANNER_MAX_SPREAD_BPS
         
         try:
-            # Get all USDT perpetual symbols
-            if not self.exchange.futures_client:
-                await self.exchange.initialize()
+            # Get all USDT perpetual symbols from public API
+            logger.info("Fetching perpetual symbols from Binance public API...")
+            url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
             
-            logger.info("Loading markets...")
-            await self.exchange.futures_client.load_markets()
-            markets = self.exchange.futures_client.markets
-            logger.info(f"Loaded {len(markets)} markets")
-            
-            # Filter USDT perpetuals
-            symbols = [
-                symbol for symbol, market in markets.items()
-                if market.get('quote') == quote
-                and market.get('type') == 'swap'  # Perpetual futures
-                and market.get('active', True)
-            ]
+            # Disable SSL verification for development (use SSL context in production)
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        # Filter USDT perpetuals
+                        symbols = [
+                            s['symbol'] for s in data.get('symbols', [])
+                            if s.get('quoteAsset') == quote
+                            and s.get('contractType') == 'PERPETUAL'
+                            and s.get('status') == 'TRADING'
+                        ]
+                        logger.info(f"Found {len(symbols)} {quote} perpetual symbols")
+                    else:
+                        logger.error(f"Failed to fetch exchange info: {response.status}")
+                        # Fallback to common symbols
+                        symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT']
+                        logger.warning(f"Using fallback symbols: {symbols}")
             
             results = []
             
@@ -74,13 +82,27 @@ class FundingScannerService:
                         funding_info = await self.exchange.get_funding_rate(symbol)
                         funding_rate = funding_info.get('funding_rate', 0)
                         
-                        # Skip if below minimum (only if we have a valid rate)
-                        if funding_rate == 0 or funding_rate < min_rate:
+                        # Skip if below minimum threshold (check absolute value for both positive and negative rates)
+                        # Positive rates: funding_rate >= min_rate (e.g., 0.0002 = 0.02%)
+                        # Negative rates: funding_rate <= -min_rate (e.g., -0.0002 = -0.02%)
+                        # Use absolute value to check both directions
+                        abs_funding_rate = abs(funding_rate)
+                        if funding_rate == 0 or abs_funding_rate < min_rate:
                             return None
                         
-                        # Get prices
-                        spot_price = await self.exchange.get_spot_price(symbol)
-                        perp_price = await self.exchange.get_perp_price(symbol)
+                        # Get prices (skip if spot market doesn't exist)
+                        try:
+                            spot_price = await self.exchange.get_spot_price(symbol)
+                        except Exception as e:
+                            logger.debug(f"No spot market for {symbol}: {e}")
+                            # Some perp-only symbols don't have spot, skip them
+                            return None
+                        
+                        try:
+                            perp_price = await self.exchange.get_perp_price(symbol)
+                        except Exception as e:
+                            logger.debug(f"Error getting perp price for {symbol}: {e}")
+                            return None
                         
                         # Calculate basis and spread
                         basis_pct = ((perp_price - spot_price) / spot_price * 100) if spot_price > 0 else 0
@@ -127,8 +149,9 @@ class FundingScannerService:
                 if r is not None and not isinstance(r, Exception)
             ]
             
-            # Sort by funding rate (descending)
-            valid_results.sort(key=lambda x: x['funding_rate'], reverse=True)
+            # Sort by absolute funding rate (descending) to show highest opportunities first
+            # This includes both positive (long pays short) and negative (short pays long) rates
+            valid_results.sort(key=lambda x: abs(x['funding_rate']), reverse=True)
             
             return valid_results
             

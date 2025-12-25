@@ -8,12 +8,14 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-white p-6 rounded-lg shadow">
-        <h1 className="text-2xl font-bold mb-4">Funding Rate Scanner</h1>
+      <div className="bg-black/50 border border-green-500/30 p-6 rounded-lg shadow-lg shadow-green-500/20">
+        <h1 className="text-3xl font-bold mb-4 text-green-400 text-glow-strong animate-pulse-glow">
+          🚀 Funding Rate Scanner
+        </h1>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-green-400 mb-1 text-glow">
               Min Funding Rate
             </label>
             <input
@@ -21,13 +23,13 @@ export default function Dashboard() {
               step="0.0001"
               value={minRate || ''}
               onChange={(e) => setMinRate(e.target.value ? parseFloat(e.target.value) : undefined)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 bg-black border border-green-500/50 text-green-400 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 font-mono"
               placeholder="0.0002"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-green-400 mb-1 text-glow">
               Max Spread (bps)
             </label>
             <input
@@ -35,20 +37,20 @@ export default function Dashboard() {
               step="0.1"
               value={maxSpreadBps || ''}
               onChange={(e) => setMaxSpreadBps(e.target.value ? parseFloat(e.target.value) : undefined)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 bg-black border border-green-500/50 text-green-400 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 font-mono"
               placeholder="8"
             />
           </div>
 
           <div className="flex items-end">
-            <label className="flex items-center">
+            <label className="flex items-center cursor-pointer">
               <input
                 type="checkbox"
                 checked={autoRefresh}
                 onChange={(e) => setAutoRefresh(e.target.checked)}
-                className="mr-2"
+                className="mr-2 w-5 h-5 accent-green-500"
               />
-              <span className="text-sm text-gray-700">Auto Refresh</span>
+              <span className="text-sm text-green-400 text-glow">⚡ Auto Refresh</span>
             </label>
           </div>
         </div>
