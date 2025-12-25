@@ -10,13 +10,17 @@ echo "Python version: $(python3 --version)"
 # Set PYTHONPATH to include /app for imports
 export PYTHONPATH=/app:${PYTHONPATH}
 
-# Check if frontend exists
-if [ -d "/app/frontend/dist" ]; then
-    echo "✅ Frontend dist found at /app/frontend/dist"
-    ls -la /app/frontend/dist | head -10
-else
-    echo "⚠️ Frontend dist not found at /app/frontend/dist"
-fi
+# Check if frontend exists (try multiple paths)
+echo "Checking for frontend dist..."
+for path in "/app/frontend/dist" "../frontend/dist" "../../frontend/dist" "$(pwd)/../frontend/dist"; do
+    if [ -d "$path" ] && [ -f "$path/index.html" ]; then
+        echo "✅ Frontend dist found at $path"
+        ls -la "$path" | head -10
+        break
+    else
+        echo "⚠️ Frontend dist not found at $path"
+    fi
+done
 
 # Check if backend exists
 if [ -d "/app/backend" ]; then

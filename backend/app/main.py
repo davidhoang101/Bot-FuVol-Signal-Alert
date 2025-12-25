@@ -51,19 +51,28 @@ app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
 # Local: backend/app/main.py -> backend -> root -> frontend/dist
 # Docker: /app/backend/app/main.py -> /app/backend -> /app -> frontend/dist
 # Or: /app/frontend/dist (absolute path in Docker)
+logger_main = logging.getLogger(__name__)
 possible_paths = [
-    Path(__file__).parent.parent.parent.parent / "frontend" / "dist",  # Local dev
-    Path("/app/frontend/dist"),  # Docker absolute path
-    Path(__file__).parent.parent.parent / "frontend" / "dist",  # Alternative Docker path
+    Path("/app/frontend/dist"),  # Docker absolute path (Railway/Docker)
+    Path(__file__).parent.parent.parent / "frontend" / "dist",  # Docker: /app/backend -> /app -> frontend/dist
+    Path(__file__).parent.parent.parent.parent / "frontend" / "dist",  # Local dev: backend -> root -> frontend/dist
+    Path.cwd().parent / "frontend" / "dist",  # Alternative: from working dir
+    Path.cwd() / "frontend" / "dist",  # If running from root
 ]
+
 frontend_dist = None
+logger_main.info(f"Searching for frontend dist. Current dir: {Path.cwd()}, __file__: {__file__}")
 for path in possible_paths:
+    logger_main.info(f"Checking path: {path} (exists: {path.exists()})")
     if path.exists() and (path / "index.html").exists():
         frontend_dist = path
+        logger_main.info(f"✅ Found frontend dist at: {frontend_dist}")
         break
+
 if frontend_dist is None:
     # Fallback to first path if none found (will show error in startup)
     frontend_dist = possible_paths[0]
+    logger_main.warning(f"⚠️ Frontend dist not found, using fallback: {frontend_dist}")
 
 # Mount static assets if they exist (must be before catch-all route)
 static_dir = frontend_dist / "assets"
