@@ -79,6 +79,42 @@ static_dir = frontend_dist / "assets"
 if static_dir.exists():
     app.mount("/assets", StaticFiles(directory=str(static_dir)), name="assets")
 
+# Debug endpoint to check frontend status
+@app.get("/api/debug/frontend")
+async def debug_frontend():
+    """Debug endpoint to check frontend build status."""
+    return {
+        "frontend_dist_path": str(frontend_dist),
+        "frontend_dist_exists": frontend_dist.exists(),
+        "index_html_exists": (frontend_dist / "index.html").exists() if frontend_dist.exists() else False,
+        "current_dir": str(Path.cwd()),
+        "file_location": __file__,
+        "possible_paths": [str(p) for p in possible_paths],
+        "static_dir_exists": static_dir.exists() if frontend_dist.exists() else False,
+    }
+
+# Root path - serve index.html
+@app.get("/")
+async def serve_root():
+    """Serve frontend index.html for root path."""
+    index_path = frontend_dist / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "Frontend not built",
+            "message": "Please build frontend first: cd frontend && npm run build",
+            "path": str(frontend_dist),
+            "current_dir": str(Path.cwd()),
+            "debug": {
+                "frontend_dist_exists": frontend_dist.exists(),
+                "index_path": str(index_path),
+            }
+        }
+    )
+
 # Serve frontend static files (catch-all route - must be LAST)
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
@@ -95,7 +131,8 @@ async def serve_frontend(full_path: str):
                 "error": "Frontend not built",
                 "message": "Please build frontend first: cd frontend && npm run build",
                 "path": str(frontend_dist),
-                "current_dir": str(Path.cwd())
+                "current_dir": str(Path.cwd()),
+                "requested": full_path
             }
         )
     
